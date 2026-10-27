@@ -85,6 +85,7 @@ exit_level_flag = False # set when player exits level
 next_level_code = 0 # next level to load (from exit sprite param)
 killing_floor = False # set when KillingFloor entity activates
 game_completed = False # set when all 8 levels completed
+casual = False # game mode: True = casual (easy), False = hardcore
 
 # random numbers for active screen
 screen_randoms = []

@@ -16,6 +16,18 @@ MOVE_STEP = 8
 JUMP_STEPS = [20, 18, 16, 12, 10, 8, 6, 4, 2, 0]
 FALL_STEPS = [2, 4, 6, 8, 10, 12, 16, 18, 20, 22, 24,
               26, 28, 32, 34, 36, 38, 40, 42, 44, 48]
+# casual mode only: horizontal flight speed correction per airborne frame
+AIR_CONTROL_STEP = MOVE_STEP // 2
+# casual mode: double (mid-air) jump strength relative to the ground jump
+CASUAL_AIR_JUMP_POWER = 0.5
+# casual mode: per-frame upward impulse of the double jump. It is ADDED to
+# the current vertical velocity instead of replacing it.
+CASUAL_AIR_JUMP_STEPS = [int(round(v * CASUAL_AIR_JUMP_POWER))
+                         for v in JUMP_STEPS]
+# casual mode: temporary invulnerability after taking a hit (frames, 20 FPS)
+CASUAL_INVULN_FRAMES = 20
+# casual mode: magazine capacity multiplier
+CASUAL_AMMO_MULT = 3
 # frozen-frames after teleport_in before regaining control (EB_HERO.C:134)
 TELEPORT_TIME = 12
 
@@ -68,6 +80,10 @@ class PlayerEntity(ga.FSM, ga.Entity):
         self.to_ground = 0  # distance to ground
         self.jump = 0  # index to jump and fall vectors LUT
         self.counter = 0  # used to time some states
+        self.double_jump_used = False  # casual mode: mid-air jump used
+        self.air_push_index = None  # casual mode: active mid-air impulse step
+        self.up_pressed = False  # fresh UP press in the current frame
+        self.prev_up = False  # UP key state in the previous frame
         self.screen = None  # current screen definition
         self.touched = None  # objects touched during recent move
         self.teleport_target = None  # tuple holding teleport destination target
@@ -122,6 +138,7 @@ class PlayerEntity(ga.FSM, ga.Entity):
         self.magazine = [0, 20, 15, 25, 10, 15] # # of shots for each weapon level
         self.heat = [0,  1,  2,  1,  4,  3] # temperature increase for each level
         self.cooldown = 0  # cooldown counter
+        self.invuln_timer = 0  # casual mode: frames of invulnerability left
 
     def display(self):
         """
@@ -130,6 +147,9 @@ class PlayerEntity(ga.FSM, ga.Entity):
         """
         # Don't display player during death animation
         if self.state == self.state_death:
+            return
+        # casual mode: blink while temporarily invulnerable after a hit
+        if self.invuln_timer > 0 and (self.invuln_timer // 2) % 2:
             return
 
         try:
@@ -203,9 +223,48 @@ class PlayerEntity(ga.FSM, ga.Entity):
             self.counter = 0
             self.anim = ("LLAND", "RLAND")[self.orientation]
             self.frame = 0
+            self.double_jump_used = False  # ground jump, extra jump available
+            self.air_push_index = None  # no mid-air impulse yet
         self.counter += 1
         if self.counter == 2:
             return self.new_state(self.state_jump)
+
+    def apply_air_control(self):
+        """
+        Casual mode only: correct the horizontal flight speed while
+        airborne. Holding LEFT/RIGHT steers the drift towards ±MOVE_STEP,
+        releasing both brakes it to 0 (the original keeps the take-off
+        momentum frozen until landing).
+        """
+        if self.controller.left:
+            target = -MOVE_STEP
+            self.orientation = 0
+        elif self.controller.right:
+            target = MOVE_STEP
+            self.orientation = 1
+        else:
+            target = 0
+        if self.move_vector.x < target:
+            self.move_vector.x = min(self.move_vector.x + AIR_CONTROL_STEP,
+                                     target)
+        elif self.move_vector.x > target:
+            self.move_vector.x = max(self.move_vector.x - AIR_CONTROL_STEP,
+                                     target)
+        # keep the jump pose in sync with the flight direction
+        self.anim = ("LJUMP", "RJUMP")[self.orientation]
+
+    def casual_air_push(self):
+        """
+        Casual mode: consume one frame of the mid-air jump impulse.
+        Returns the upward velocity to ADD to the current vertical motion
+        (0 when no air jump is active).
+        """
+        if not gl.casual or self.air_push_index is None:
+            return 0
+        steps = CASUAL_AIR_JUMP_STEPS
+        index = self.air_push_index
+        self.air_push_index = index + 1 if index + 1 < len(steps) else None
+        return steps[index]
 
     def state_jump(self, init=False):
         """Handle jumping state."""
@@ -220,14 +279,24 @@ class PlayerEntity(ga.FSM, ga.Entity):
             self.jump = 0
             self.anim = ("LJUMP", "RJUMP")[self.orientation]
             self.frame = 0
-        # vertical movement first
-        up = XY(0, -JUMP_STEPS[self.jump])
+        if gl.casual:
+            # fresh UP press adds a mid-air impulse once (double jump)
+            if self.up_pressed and not self.double_jump_used:
+                self.double_jump_used = True
+                self.air_push_index = 0
+                logging.debug("Casual mode: double jump")
+            self.apply_air_control()
+        # vertical movement first: the mid-air impulse ADDS to the velocity
+        push = self.casual_air_push()
+        index = min(self.jump, len(JUMP_STEPS) - 1)
+        vy = JUMP_STEPS[index] + push
+        up = XY(0, -vy)
         pup, touched = self.check_move(up, self.screen)
         self.touched.extend(touched)  # touch will be handled later
         pos = self.get_position()
         pos += pup
         self.set_position(pos)
-        if (pup.y > up.y) or up.y == 0:
+        if (pup.y > up.y) or vy <= 0:
             # collided or reached max point, switch to fall next frame
             self.new_state(self.state_fall)
         # then horizontal movement
@@ -247,6 +316,14 @@ class PlayerEntity(ga.FSM, ga.Entity):
             self.move_vector.y = 0
             self.jump = 0
 
+        if gl.casual:
+            # fresh UP press adds a mid-air impulse once (double jump)
+            if self.up_pressed and not self.double_jump_used:
+                self.double_jump_used = True
+                self.air_push_index = 0
+                logging.debug("Casual mode: double jump")
+            self.apply_air_control()
+
         # Check killing floor death (EB_ENEM.C:486-492)
         # When killing_floor is active, player dies if they fall below threshold
         if gl.killing_floor and self.get_bottom() > (gl.SCREEN_Y - 1) * gl.SPRITE_Y:
@@ -256,22 +333,28 @@ class PlayerEntity(ga.FSM, ga.Entity):
         if self.to_ground == 0:
             return self.switch_state(self.state_land)
         else:
-            self.move_vector.y = FALL_STEPS[self.jump]
-            if self.to_ground < self.move_vector.y:
-                self.move_vector.y = self.to_ground
+            # the mid-air impulse ADDS to the falling velocity
+            push = self.casual_air_push()
+            vy = push - FALL_STEPS[self.jump]  # positive = moving up
+            if vy < 0 and self.to_ground < -vy:
+                vy = -self.to_ground  # stop exactly on the ground
+            self.move_vector.y = -vy
             moved = self.move()
             # reset horizontal vector if wall hit while falling
             self.move_vector.x = moved.x
-            self.jump += 1
-            if self.jump == len(FALL_STEPS):
-                # limit max vertical speed and cancel horizontal then
-                self.move_vector.x = 0
-                self.jump -= 1
+            if vy <= 0:
+                self.jump += 1
+                if self.jump == len(FALL_STEPS):
+                    # limit max vertical speed and cancel horizontal then
+                    self.move_vector.x = 0
+                    self.jump -= 1
 
     def state_land(self, init=False):
         """Handle landing state - hero_after_fall_proc EB_HERO.C:782-795."""
         if init:
             self.counter = 2
+            self.double_jump_used = False  # grounded, extra jump available
+            self.air_push_index = None  # cancel any leftover impulse
         self.anim = ("LLAND", "RLAND")[self.orientation]
         self.frame = 0
         self.counter -= 1
@@ -342,6 +425,7 @@ class PlayerEntity(ga.FSM, ga.Entity):
                 self.switch_state(self.state_fall)
             self.anim = ("LSTAND", "RSTAND")[self.orientation]
             self.frame = 0
+            self.air_push_index = None  # grounded
         if self.to_ground > 0:
             return self.switch_state(self.state_fall)
         if self.controller.left or self.controller.right:
@@ -463,9 +547,16 @@ class PlayerEntity(ga.FSM, ga.Entity):
             sp.y = (gl.SCREEN_Y + 1) * gl.SPRITE_Y
             sn = (sn - 16) % 256
 
+    def max_ammo(self, power):
+        """Magazine capacity for a weapon level (x3 in casual mode)."""
+        base = self.magazine[power]
+        if gl.casual and base:
+            return base * CASUAL_AMMO_MULT
+        return base
+
     def select_weapon(self, power):
         self.power = power
-        self.ammo = self.magazine[power]
+        self.ammo = self.max_ammo(power)
 
     def inc_power(self):
         """
@@ -473,7 +564,7 @@ class PlayerEntity(ga.FSM, ga.Entity):
         the magazine to full -- even at max power the battery tops up ammo.
         """
         self.power = min(self.power + 1, 5)
-        self.ammo = self.magazine[self.power]
+        self.ammo = self.max_ammo(self.power)
         di.info_lines.add("battery collected")
 
     def activate_checkpoint(self, obj):
@@ -528,6 +619,36 @@ class PlayerEntity(ga.FSM, ga.Entity):
                      current_screen, current_pos)
         return True
 
+    def take_hit(self, play_sound=True):
+        """
+        Player takes damage.
+
+        Hardcore: immediate death, as in the original.
+        Casual: instead of dying, lose 1 unit of weapon battery power and
+        get CASUAL_INVULN_FRAMES of blinking invulnerability; with no power
+        left the hero still dies.
+        """
+        if self.state == self.state_death or self.invuln_timer > 0:
+            return
+        if not gl.casual:
+            self.new_state(self.state_death)
+            return
+        if self.power <= 0:
+            self.new_state(self.state_death)
+            return
+        # drop one battery level and refill ammo for the lower level
+        self.power -= 1
+        if self.power > 0:
+            self.select_weapon(self.power)
+            self.temp = min(self.temp, 1)
+        else:
+            self.ammo = 0
+            self.temp = 0
+        self.invuln_timer = CASUAL_INVULN_FRAMES
+        if play_sound:
+            snd.play_sound('blast')
+        di.info_lines.add("Hit! battery power: %d" % self.power)
+        logging.info("Casual mode: hit taken, power left %d", self.power)
 
     def power_and_cooldown(self):
         """
@@ -618,9 +739,9 @@ class PlayerEntity(ga.FSM, ga.Entity):
                         exp_y = obj_pos.y + obj_bbox.y + obj_bbox.height // 2 - 24
                         put_explosion(exp_x, exp_y)
                         obj.vanish()
-                        # Trigger player death (delayed via new_state, mirrors
-                        # bomb_flag check after ENEM_TEST completes)
-                        self.new_state(self.state_death)
+                        # Damage or death depending on the mode (casual
+                        # survives with a battery level lost)
+                        self.take_hit(play_sound=False)
                 elif touch_type == 5:
                     # floppy - collect disk
                     gl.disks += 1
@@ -686,8 +807,7 @@ class PlayerEntity(ga.FSM, ga.Entity):
                             self.new_state(self.state_teleport_out)
                             di.info_lines.add("Secret area found!")
                         else:
-                            if self.state != self.state_death:
-                                self.new_state(self.state_death)
+                            self.take_hit()
             di.message(XY(16, 40), "touch: %s" % names)
 
     def check_enemy_collision(self):
@@ -736,12 +856,12 @@ class PlayerEntity(ga.FSM, ga.Entity):
 
                 if (p_left - expand_x < e_cx < p_right + expand_x and
                     p_top - expand_y < e_cy < p_bottom + expand_y):
-                    # Collision - trigger death
+                    # Collision - damage or death depending on the mode
                     if self.state != self.state_death:
                         logging.warning("COLLISION! Player hit by %s at %s (center=%d,%d)",
                                        entity_type, e_pos, e_cx, e_cy)
                         logging.warning("  Player pos=%s, enemy_bbox=%s", pos, self.enemy_bbox)
-                        self.new_state(self.state_death)
+                        self.take_hit()
                     return
 
     def respawn(self):
@@ -781,6 +901,7 @@ class PlayerEntity(ga.FSM, ga.Entity):
         # Reset player stats
         self.temp = 0
         self.death_timer = 0
+        self.invuln_timer = 0
         self.touched = []  # Clear touched objects to prevent immediate re-death
 
         # Reset killing floor flag (level is reset, so floor collisions are back)
@@ -856,9 +977,15 @@ class PlayerEntity(ga.FSM, ga.Entity):
         # keep track of to ground distance
         self.to_ground = self.check_ground(self.screen)
         di.message(XY(16, 8), "to ground: %d" % self.to_ground)
+        # casual mode: edge-detect a fresh UP press (used by double jump)
+        self.up_pressed = self.controller.up and not self.prev_up
         # run FSM for the player's entity
         if not self.controller.debug:
             self.run_fsm()
+        self.prev_up = self.controller.up
+        # casual mode: count down temporary invulnerability after a hit
+        if self.invuln_timer > 0:
+            self.invuln_timer -= 1
         # handle shooting
         if self.controller.fire:
             if self.state in [self.state_jump,

@@ -360,11 +360,13 @@ class SaveGame:
 class MainMenu:
     """
     Main menu screen controller.
-    Displays CONTINUE, NEW GAME, QUIT options with authentic sprite font.
+    Displays CONTINUE, NEW GAME, CASUAL/HARDCORE, QUIT options with
+    authentic sprite font.
     """
 
-    # Menu options
-    OPTIONS = ["CONTINUE", "NEW GAME", "QUIT"]
+    # Menu options. The mode entry label is dynamic (casual/hardcore).
+    OPTIONS = ["CONTINUE", "NEW GAME", "CASUAL", "QUIT"]
+    MODE_INDEX = 2  # index of the casual/hardcore toggle
 
     # Colors
     COLOR_NORMAL = None  # No modification - full brightness
@@ -407,6 +409,10 @@ class MainMenu:
                     self.move_selection(-1)
                 elif event.key == pygame.K_DOWN:
                     self.move_selection(1)
+                elif event.key in (pygame.K_LEFT, pygame.K_RIGHT):
+                    # LEFT/RIGHT switches casual/hardcore without leaving menu
+                    if self.selected == self.MODE_INDEX:
+                        self.toggle_mode()
                 elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
                     self.select_option()
                 elif event.key == pygame.K_ESCAPE:
@@ -434,6 +440,11 @@ class MainMenu:
 
     def select_option(self):
         """Handle option selection."""
+        if self.selected == self.MODE_INDEX:
+            # Enter on the mode entry toggles it instead of leaving the menu
+            self.toggle_mode()
+            return
+
         snd.play_sound('ask')
         option = self.OPTIONS[self.selected]
 
@@ -468,12 +479,12 @@ class MainMenu:
         subtitle_y = self.TITLE_Y + 60
         self.letters.render_text_centered(surface, "PYTHON PORT", subtitle_y)
 
-        # Draw menu options
-        for i, option in enumerate(self.OPTIONS):
+        # Draw menu options (mode entry label depends on gl.casual)
+        for i, option in enumerate(self.get_options()):
             y = self.OPTIONS_START_Y + i * self.OPTIONS_SPACING
 
             # Determine color based on state
-            if option == "CONTINUE" and not self.has_save:
+            if i == 0 and not self.has_save:
                 color_mod = self.COLOR_DISABLED
             else:
                 color_mod = self.COLOR_NORMAL
@@ -481,11 +492,17 @@ class MainMenu:
             # Draw option text centered
             self.letters.render_text_centered(surface, option, y, color_mod)
 
+            text_width = self.letters.get_text_width(option)
+            surface_width = int(round(surface.get_width() / gl.RENDER_SCALE))
+            text_x = (surface_width - text_width) // 2
+
+            # Mark the mode entry as a toggle (arrow on the right side)
+            if i == self.MODE_INDEX:
+                self.letters.render_text(surface, ">", XY(text_x + text_width + 10, y))
+
             # Draw selection arrow
             if i == self.selected and self.arrow_visible:
                 # Calculate position for arrow (left of text)
-                text_width = self.letters.get_text_width(option)
-                text_x = (surface.get_width() - text_width) // 2
                 arrow_x = text_x - 60  # 60 pixels left of text
                 self.letters.render_text(surface, ">", XY(arrow_x, y))
 
