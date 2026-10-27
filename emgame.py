@@ -631,9 +631,18 @@ class World:
 
     def spawn(self, obj):
         """Register an object in the world and in its room's level data."""
+        position = obj.get_position()
         if obj not in self.entities:
             self.entities.append(obj)
-        room = gl.room_of(obj.get_position().x, obj.get_position().y)
+            # Remember the real spawn cell of runtime objects (projectiles,
+            # explosions, debris). Some of them are created at a placeholder
+            # position and moved afterwards (Projectile), so without this
+            # remove()/vanish() looked for them in room 0 and failed: the
+            # "removed" projectile stayed in its room's active list, kept
+            # flying through walls and enemies and only died at the activity
+            # zone edge (docs/weapon_mechanics.md 6).
+            obj.home_position = position.copy()
+        room = gl.room_of(position.x, position.y)
         screen = None
         if 0 <= room < len(self.screens):
             screen = self.screens[room]
@@ -663,7 +672,15 @@ class World:
             screen = self.screens[room]
             if screen is not None and obj in screen.active:
                 screen.active.remove(obj)
-                removed = True
+                return True
+        # Safety net: the recorded spawn cell may be wrong (objects created
+        # before the cell was stored, restored from an old save). Never leave
+        # a dead object in a room's active list - it would keep being updated
+        # and displayed.
+        for screen in self.screens:
+            if screen is not None and obj in screen.active:
+                screen.active.remove(obj)
+                return True
         return removed
 
     def add_to_level_data(self, screen, entity):

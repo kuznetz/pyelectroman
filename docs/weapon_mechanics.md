@@ -59,7 +59,7 @@ Firing is handled in [`PlayerEntity.update()`](../emhero.py:990):
   Firing is blocked during death and during teleport animations.
 * `power == 0` means no shot at all.
 * Heat gate: a shot is only fired if
-  `temp + heat[power] <= 5` ([`fire_weapon()`](../emhero.py:1046)).
+  `temp + heat[power] <= 5` ([`fire_weapon()`](../emhero.py:1047)).
   If there is not enough heat head-room, **nothing happens**: no projectile, no
   ammo loss, no sound, no visible feedback.
 
@@ -136,7 +136,7 @@ deliberate pairs, and levels 1 and 3 can be spammed until the magazine empties.
 
 ## 6. Projectile lifecycle (common rules)
 
-Every shot spawns a [`Projectile`](../emhero.py:1063) entity from the table
+Every shot spawns a [`Projectile`](../emhero.py:1062) entity from the table
 [`PlayerEntity.projectiles`](../emhero.py:1018):
 
 | Power | `_L` offset | `_R` offset | Step per frame |
@@ -147,18 +147,26 @@ Every shot spawns a [`Projectile`](../emhero.py:1063) entity from the table
 | 4 | `(-46, +32)` | `(+46, +32)` | 24 |
 | 5 | `(-36, +8)` | `(+36, +8)` | 32 |
 
-Per frame ([`Projectile.update()`](../emhero.py:1084)):
+Per frame ([`Projectile.update()`](../emhero.py:1083)):
 
 1. Advance the animation frame (one sprite per frame).
 2. Move horizontally by `step` pixels (negative = left). There is **no gravity and
    no vertical movement** — every weapon fires strictly horizontally.
 3. Check wall collision.
 4. Check collisions with all active entities.
-5. Vanish silently when the projectile leaves the screen
-   (`x > 13 * 48` or `x < -48`) — no explosion, no sound, for every level.
+5. Vanish silently when the projectile has completely left the **activity zone**
+   (viewport + half a viewport in every direction,
+   [`World.activity_rect()`](../emgame.py:700)) — no explosion, no sound, for every
+   level.
 
-Only entities of the **current screen** are tested, so projectiles never cross
-room boundaries; they are removed at the screen edge instead.
+The level is seamless, so a shot may cross room boundaries; it dies only at the
+activity-zone edge. Projectiles that were not updated (they left the zone) are
+swept away by [`Gameplay.cleanup_inactive()`](../em.py:432), so nothing hangs.
+
+Every collision ends the projectile reliably because [`World.spawn()`](../emgame.py:632)
+records the real spawn cell that [`World.remove()`](../emgame.py:658) uses to find the
+object's room; without it a shot fired outside room 0 was never removed from its
+room's active list and kept flying through walls and enemies.
 
 ---
 
@@ -184,7 +192,7 @@ room boundaries; they are removed at the screen edge instead.
 | Wall hit | single visual explosion, silent |
 | Sound | `wpn_1.wav` |
 
-The animation wrap is detected in [`Projectile.update()`](../emhero.py:1092);
+The animation wrap is detected in [`Projectile.update()`](../emhero.py:1083);
 this is the only level with a hard range limit. Effectively a short-range,
 cheap-to-fire (heat 1) close-quarters weapon with the largest magazine.
 
@@ -197,7 +205,7 @@ cheap-to-fire (heat 1) close-quarters weapon with the largest magazine.
 | Magazine / heat | 15 / **2** |
 | Spawn offset | ±46 px horizontal, +32 px vertical |
 | Speed | **32 px/frame** (fastest with level 5) |
-| Range | unlimited (until wall / enemy / screen edge) |
+| Range | unlimited (until wall / enemy / activity-zone edge) |
 | Penetration | none — removed on the first enemy hit |
 | Wall hit | single visual explosion, silent |
 | Sound | `wpn_2.wav` |
@@ -237,7 +245,7 @@ slower flight — the best sustained-fire level in the game.
 | Sound | `wpn_4.wav` |
 
 Penetration is implemented in
-[`Projectile.check_all_collisions()`](../emhero.py:1225):
+[`Projectile.check_all_collisions()`](../emhero.py:1170):
 
 ```python
 if hit_enemy_this_frame:
@@ -267,18 +275,18 @@ always removed after hitting a shootable object, regardless of level.
 
 Details:
 
-* Display: [`Projectile.display()`](../emhero.py:1385) blits the current frame and
+* Display: [`Projectile.display()`](../emhero.py:1388) blits the current frame and
   the next frame one tile below it.
-* Extended hit box: [`collides_with()`](../emhero.py:1249) and
-  [`check_wall_collision()`](../emhero.py:1152) both enlarge the projectile box,
+* Extended hit box: [`collides_with()`](../emhero.py:1242) and
+  [`check_wall_collision()`](../emhero.py:1142) both enlarge the projectile box,
   so the bow covers two tile rows.
-* Wall hit: [`bow_end_explosion()`](../emhero.py:1365) spawns three explosions
+* Wall hit: [`bow_end_explosion()`](../emhero.py:1368) spawns three explosions
   staggered vertically ahead of the impact point:
   `(x ∓ 2, y)`, `(x ± 16, y + 24)`, `(x ∓ 2, y + 48)` (scaled coordinates).
   Like the other wall impacts, this triple explosion is **silent** — only the
   projectile spawn sound is played.
-* Leaving the screen is still a silent removal: the triple explosion belongs only
-  to the *wall-hit* path, not to the screen-exit path.
+* Leaving the activity zone is still a silent removal: the triple explosion belongs
+  only to the *wall-hit* path, not to the zone-exit path.
 
 ### Quick reference
 
@@ -301,7 +309,7 @@ Sprite frame ranges come from [`Weapons`](../emother.py:70); assets live in
 
 ### Enemies
 
-Handled by [`Projectile.hit_enemy()`](../emhero.py:1266):
+Handled by [`Projectile.hit_enemy()`](../emhero.py:1272):
 
 * **Every weapon level kills an enemy instantly.** `enemy.take_damage(level)` is
   called, but both [`EnemyPlatform.take_damage()`](../emgame.py:1374) and
@@ -316,7 +324,7 @@ Handled by [`Projectile.hit_enemy()`](../emhero.py:1266):
 
 ### Shootable objects
 
-Handled by [`Projectile.hit_object()`](../emhero.py:1280):
+Handled by [`Projectile.hit_object()`](../emhero.py:1286):
 
 * An object is hittable only if the `shootable` flag of its **current animation
   frame** is set (batteries are touchable but not shootable).
@@ -331,7 +339,7 @@ Handled by [`Projectile.hit_object()`](../emhero.py:1280):
 
 ### Walls
 
-Handled by [`Projectile.check_wall_collision()`](../emhero.py:1137):
+Handled by [`Projectile.check_wall_collision()`](../emhero.py:1142):
 
 * A wall blocks the shot only if it has a solid side **facing the projectile's
   direction** (`L` side for a right-moving shot, `R` side for a left-moving one),
@@ -339,10 +347,14 @@ Handled by [`Projectile.check_wall_collision()`](../emhero.py:1137):
 * Levels 1–4: a single visual explosion at the impact point, no sound.
 * Level 5: the triple explosion described above, no sound.
 
-### Screen boundary
+### Activity-zone boundary
 
-Any projectile that leaves the current room is removed without explosion or
-sound, on every level.
+Any projectile that has completely left the activity zone (the viewport inflated by
+half a viewport, [`World.activity_rect()`](../emgame.py:700)) is removed without
+explosion or sound, on every level. Room seams are not walls for projectiles — a
+shot may fly into the neighbouring room. Projectiles that end up outside the zone
+while not being updated are removed by
+[`Gameplay.cleanup_inactive()`](../em.py:432).
 
 ---
 
@@ -355,7 +367,7 @@ sound, on every level.
 | Activating a checkpoint ([`activate_checkpoint()`](../emhero.py:614)) | `power = 0`, `temp = 0`, magazine of level 0 (= none) |
 | Battery pickup ([`inc_power()`](../emhero.py:561)) | `power = min(power + 1, 5)`, magazine refilled to full |
 | Magazine emptied ([`fire_weapon()`](../emhero.py:1058)) | one level down, magazine of the lower level refilled |
-| Quick save ([`_restore_player()`](../emquicksave.py:463)) | `power`, `temp`, `ammo`, `cooldown`, `fired` are stored and restored verbatim |
+| Quick save ([`_restore_player()`](../emquicksave.py:547)) | `power`, `temp`, `ammo`, `cooldown`, `fired` are stored and restored verbatim |
 
 ### Casual mode differences
 
@@ -378,7 +390,7 @@ sound, on every level.
 | Projectile hits an enemy | `xplosion.wav` (`blast`) |
 | Projectile destroys a shootable object | `xplosion.wav` (`blast`) |
 | Projectile hits a wall | — (silent) |
-| Projectile leaves the screen | — (silent) |
+| Projectile leaves the activity zone | — (silent) |
 | Battery collected | `battery.wav` |
 
 ---
@@ -412,13 +424,15 @@ bow's double-height hit box and the triple explosion.
 | HUD indicators | [`show_hud()`](../emhero.py:669) |
 | Fire input and one-shot latch | [`PlayerEntity.update()`](../emhero.py:990) |
 | Projectile spawn offsets and speeds | [`projectiles`](../emhero.py:1018) |
-| Shot gate, heat check, ammo, downgrade | [`fire_weapon()`](../emhero.py:1031) |
-| Projectile entity and per-frame logic | [`Projectile`](../emhero.py:1063) |
-| Level-1 range limit | [`Projectile.update()`](../emhero.py:1092) |
-| Wall collision | [`check_wall_collision()`](../emhero.py:1137) |
-| Multi-entity collision and level-4 penetration | [`check_all_collisions()`](../emhero.py:1167) |
-| Enemy hit | [`hit_enemy()`](../emhero.py:1266) |
-| Shootable object hit / broken sprite | [`hit_object()`](../emhero.py:1280) |
-| Bow triple explosion | [`bow_end_explosion()`](../emhero.py:1365) |
-| Bow double-height drawing | [`Projectile.display()`](../emhero.py:1385) |
+| Shot gate, heat check, ammo, downgrade | [`fire_weapon()`](../emhero.py:1030) |
+| Projectile entity and per-frame logic | [`Projectile`](../emhero.py:1062) |
+| Spawn cell (correct removal from the room) | [`World.spawn()`](../emgame.py:632) |
+| Object removal / never leaves ghosts | [`World.remove()`](../emgame.py:658) |
+| Level-1 range limit / zone exit | [`Projectile.update()`](../emhero.py:1083) |
+| Wall collision | [`check_wall_collision()`](../emhero.py:1142) |
+| Multi-entity collision and level-4 penetration | [`check_all_collisions()`](../emhero.py:1170) |
+| Enemy hit | [`hit_enemy()`](../emhero.py:1272) |
+| Shootable object hit / broken sprite | [`hit_object()`](../emhero.py:1286) |
+| Bow triple explosion | [`bow_end_explosion()`](../emhero.py:1368) |
+| Bow double-height drawing | [`Projectile.display()`](../emhero.py:1388) |
 | Weapon sprite sets | [`Weapons`](../emother.py:70) |
