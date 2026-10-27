@@ -3,6 +3,7 @@
 import emglobals as gl
 import emdata as da
 import emsound as snd
+import emdisplay as di
 from emglobals import XY
 import pygame
 import copy
@@ -168,9 +169,10 @@ class Entity:
         """
         sprite = self.sprites[self.frame]
         if not sprite.flag("in_front"):
-            # Scale sprite 2x and position 2x for larger window
-            scaled_image = pygame.transform.scale2x(sprite.image)
-            scaled_pos = XY(self.get_position().x * 2, self.get_position().y * 2)
+            # Scale sprite and position by the render coefficient
+            scaled_image = di.scale_sprite(sprite.image)
+            scaled_pos = gl.render_pos(self.get_position().x,
+                                       self.get_position().y)
             gl.display.blit(scaled_image, scaled_pos)
             if gl.show_collisions and sprite.flag("active"):
                 # show collision box or lines
@@ -181,9 +183,10 @@ class Entity:
 
     def display_deferred(self):
         """Deferred display method usef for in_front sprites."""
-        # Scale sprite 2x and position 2x for larger window
-        scaled_image = pygame.transform.scale2x(self.sprites[self.frame].image)
-        scaled_pos = XY(self.get_position().x * 2, self.get_position().y * 2)
+        # Scale sprite and position by the render coefficient
+        scaled_image = di.scale_sprite(self.sprites[self.frame].image)
+        scaled_pos = gl.render_pos(self.get_position().x,
+                                   self.get_position().y)
         gl.display.blit(scaled_image, scaled_pos)
         if gl.show_collisions:
             # show collision box or lines
@@ -197,19 +200,27 @@ class Entity:
         if collide["T"]:
             sp = position + (x, y)
             ep = position + (x + w - 1, y)
-            pygame.draw.line(gl.display, color, sp, ep)
+            pygame.draw.line(gl.display, color,
+                             gl.render_pos(sp.x, sp.y),
+                             gl.render_pos(ep.x, ep.y))
         if collide["L"]:
             sp = position + (x, y)
             ep = position + (x, y + h - 1)
-            pygame.draw.line(gl.display, color, sp, ep)
+            pygame.draw.line(gl.display, color,
+                             gl.render_pos(sp.x, sp.y),
+                             gl.render_pos(ep.x, ep.y))
         if collide["R"]:
             sp = position + (x + w - 1, y)
             ep = position + (x + w - 1, y + h - 1)
-            pygame.draw.line(gl.display, color, sp, ep)
+            pygame.draw.line(gl.display, color,
+                             gl.render_pos(sp.x, sp.y),
+                             gl.render_pos(ep.x, ep.y))
         if collide["B"]:
             sp = position + (x, y + h - 1)
             ep = position + (x + w - 1, y + h - 1)
-            pygame.draw.line(gl.display, color, sp, ep)
+            pygame.draw.line(gl.display, color,
+                             gl.render_pos(sp.x, sp.y),
+                             gl.render_pos(ep.x, ep.y))
 
     def check_ground(self, screen):
         """
@@ -885,8 +896,8 @@ class Checkpoint(Entity):
         # Display cross sprite overlay when activated
         if self.activated and self.cross_sprite:
             pos = self.get_position()
-            scaled_cross = pygame.transform.scale2x(self.cross_sprite.image)
-            scaled_pos = XY(pos.x * 2, pos.y * 2)
+            scaled_cross = di.scale_sprite(self.cross_sprite.image)
+            scaled_pos = gl.render_pos(pos.x, pos.y)
             gl.display.blit(scaled_cross, scaled_pos)
 
 
@@ -1287,12 +1298,13 @@ class EnemyPlatform(Entity):
         self.vanish()
 
     def display(self):
-        # Scale enemy sprite 2x
+        # Scale enemy sprite by the render coefficient
         if self.anims and self.anim in self.anims:
             anim_sprites = self.anims[self.anim]
             if anim_sprites and self.frame < len(anim_sprites):
-                scaled_image = pygame.transform.scale2x(anim_sprites[self.frame].image)
-                scaled_pos = XY(self.get_position().x * 2, self.get_position().y * 2)
+                scaled_image = di.scale_sprite(anim_sprites[self.frame].image)
+                scaled_pos = gl.render_pos(self.get_position().x,
+                                           self.get_position().y)
                 gl.display.blit(scaled_image, scaled_pos)
 
 class EnemyFlying(Entity):
@@ -1527,12 +1539,13 @@ class EnemyFlying(Entity):
         self.vanish()
 
     def display(self):
-        # Scale enemy sprite 2x
+        # Scale enemy sprite by the render coefficient
         if self.anims and self.anim in self.anims:
             anim_sprites = self.anims[self.anim]
             if anim_sprites and self.frame < len(anim_sprites):
-                scaled_image = pygame.transform.scale2x(anim_sprites[self.frame].image)
-                scaled_pos = XY(self.get_position().x * 2, self.get_position().y * 2)
+                scaled_image = di.scale_sprite(anim_sprites[self.frame].image)
+                scaled_pos = gl.render_pos(self.get_position().x,
+                                           self.get_position().y)
                 gl.display.blit(scaled_image, scaled_pos)
 
 
@@ -1622,22 +1635,27 @@ class EnemyProjectile(Entity):
         return 0
 
     def display(self):
-        """Display projectile sprite at 2x scale"""
+        """Display projectile sprite at the render scale"""
         pos = self.get_position()
-        scaled_pos = (pos.x * 2, pos.y * 2)
+        scaled_pos = gl.render_pos(pos.x, pos.y)
 
         if self.sprites and len(self.sprites) > 0:
             sprite = self.sprites[self.frame % len(self.sprites)]
             if sprite and hasattr(sprite, 'image') and sprite.image:
-                scaled_image = pygame.transform.scale2x(sprite.image)
+                scaled_image = di.scale_sprite(sprite.image)
                 gl.display.blit(scaled_image, scaled_pos)
                 return
 
         # Draw placeholder circle when no valid sprites available
         # Red filled circle to make projectiles visible
-        rect = pygame.Rect(scaled_pos[0] + 16, scaled_pos[1] + 16, 32, 32)
-        pygame.draw.circle(gl.display, pygame.Color(255, 0, 0), rect.center, 12)
-        pygame.draw.circle(gl.display, pygame.Color(255, 255, 0), rect.center, 8)
+        s = gl.RENDER_SCALE
+        rect = pygame.Rect(scaled_pos[0] + int(round(16 * s)),
+                           scaled_pos[1] + int(round(16 * s)),
+                           int(round(32 * s)), int(round(32 * s)))
+        pygame.draw.circle(gl.display, pygame.Color(255, 0, 0), rect.center,
+                           int(round(12 * s)))
+        pygame.draw.circle(gl.display, pygame.Color(255, 255, 0), rect.center,
+                           int(round(8 * s)))
 
     def name(self):
         return "EnemyProjectile"
@@ -1678,10 +1696,11 @@ class BrokenSprite(Entity):
         pass
 
     def display(self):
-        """Display the broken sprite at 2x scale"""
+        """Display the broken sprite at the render scale"""
         if self.frame < len(self.sprites):
-            scaled_image = pygame.transform.scale2x(self.sprites[self.frame].image)
-            scaled_pos = XY(self.get_position().x * 2, self.get_position().y * 2)
+            scaled_image = di.scale_sprite(self.sprites[self.frame].image)
+            scaled_pos = gl.render_pos(self.get_position().x,
+                                       self.get_position().y)
             gl.display.blit(scaled_image, scaled_pos)
 
     def name(self):

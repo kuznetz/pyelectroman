@@ -18,6 +18,7 @@ medium_font = None
 large_font = None
 display = None  # whole window (screen) surface
 window = None  # gameplay window subsurface
+display_surface = None  # physical fullscreen surface (window is scaled onto it)
 
 # display related globals
 SPRITE_X = 48  # size in pixels
@@ -31,6 +32,28 @@ OFFSET_X = 8  # to center 13x8 sprites screen in 640x480 window
 OFFSET_Y = 48  # to center 13x8 sprites screen in 640x480 window
 
 DISPLAY_OFFSET = (OFFSET_X, OFFSET_Y)
+
+# Physical render coefficient: physical pixels per logical (1280x960) pixel.
+# Set by emdisplay.init_display() and applied to the whole render.
+RENDER_SCALE = 1.0
+
+
+def render_pos(x, y):
+    """Convert game (1x) coordinates to physical render pixels."""
+    s = 2.0 * RENDER_SCALE
+    return (int(round(x * s)), int(round(y * s)))
+
+
+def window_pos(x, y):
+    """Convert window (2x design) coordinates to physical render pixels."""
+    return (int(round(x * RENDER_SCALE)), int(round(y * RENDER_SCALE)))
+
+
+def render_size(width, height):
+    """Convert 1x sprite dimensions to physical render dimensions."""
+    s = 2.0 * RENDER_SCALE
+    return (max(1, int(round(width * s))), max(1, int(round(height * s))))
+
 
 show_collisions = False
 

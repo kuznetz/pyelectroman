@@ -134,18 +134,18 @@ class PlayerEntity(ga.FSM, ga.Entity):
 
         try:
             position = self.get_position()
-            # display top sprite (scaled 2x)
+            # display top sprite (scaled by the render coefficient)
             sprite = self.sprites[self.anim][self.frame][0]
             sprite = self.data.get_sprite(sprite)
-            scaled_image = pygame.transform.scale2x(sprite.image)
-            scaled_pos = XY(position.x * 2, position.y * 2)
+            scaled_image = di.scale_sprite(sprite.image)
+            scaled_pos = gl.render_pos(position.x, position.y)
             gl.display.blit(scaled_image, scaled_pos)
-            # display bottom sprite (scaled 2x)
+            # display bottom sprite (scaled by the render coefficient)
             position += (0, gl.SPRITE_Y)
             sprite = self.sprites[self.anim][self.frame][1]
             sprite = self.data.get_sprite(sprite)
-            scaled_image = pygame.transform.scale2x(sprite.image)
-            scaled_pos = XY(position.x * 2, position.y * 2)
+            scaled_image = di.scale_sprite(sprite.image)
+            scaled_pos = gl.render_pos(position.x, position.y)
             gl.display.blit(scaled_image, scaled_pos)
             if gl.show_collisions:
                 # show collision box and ground testing point
@@ -158,6 +158,10 @@ class PlayerEntity(ga.FSM, ga.Entity):
         """Display player's character bounding box."""
         rect = self.get_bbox()
         rect.move_ip(self.get_position())
+        s = 2.0 * gl.RENDER_SCALE
+        rect = pygame.Rect(int(round(rect.x * s)), int(round(rect.y * s)),
+                           max(1, int(round(rect.width * s))),
+                           max(1, int(round(rect.height * s))))
         pygame.draw.rect(gl.display, color, rect, 1)
 
     def get_bbox(self):
@@ -1215,18 +1219,18 @@ class Projectile(ga.Entity):
         if self.power_level != 5:
             ga.Entity.display(self)
         else:
-            # Power level 5 projectiles are 2 sprites tall (scaled 2x)
+            # Power level 5 projectiles are 2 sprites tall
             sprite = self.sprites[self.frame % len(self.sprites)]
             pos = self.get_position()
-            scaled_image = pygame.transform.scale2x(sprite.image)
-            scaled_pos = XY(pos.x * 2, pos.y * 2)
+            scaled_image = di.scale_sprite(sprite.image)
+            scaled_pos = gl.render_pos(pos.x, pos.y)
             gl.display.blit(scaled_image, scaled_pos)
             # Second sprite below
             if len(self.sprites) > 1:
                 sprite2 = self.sprites[(self.frame + 1) % len(self.sprites)]
                 pos2 = pos + XY(0, gl.SPRITE_Y)
-                scaled_image2 = pygame.transform.scale2x(sprite2.image)
-                scaled_pos2 = XY(pos2.x * 2, pos2.y * 2)
+                scaled_image2 = di.scale_sprite(sprite2.image)
+                scaled_pos2 = gl.render_pos(pos2.x, pos2.y)
                 gl.display.blit(scaled_image2, scaled_pos2)
 
 # -----------------------------------------------------------------------------

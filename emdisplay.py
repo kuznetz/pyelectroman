@@ -7,19 +7,57 @@ import logging
 import time
 
 
+# Logical (design) resolution used by all drawing code
+LOGICAL_SIZE = (1280, 960)
+
 #noinspection PyArgumentEqualDefault
 def init_display():
     pygame.init()
-    # Use 2x scaling for better visibility on high-res monitors
-    gl.window = pygame.display.set_mode((1280, 960), 0, 32)
+    info = pygame.display.Info()
+    desktop_size = (info.current_w, info.current_h)
+    if desktop_size[0] <= 0 or desktop_size[1] <= 0:
+        desktop_size = LOGICAL_SIZE
+    try:
+        screen = pygame.display.set_mode(desktop_size, pygame.FULLSCREEN)
+    except pygame.error as e:
+        # Fallback to a windowed mode if the display rejects fullscreen
+        logging.warning("Fullscreen mode failed (%s), using windowed mode", e)
+        desktop_size = LOGICAL_SIZE
+        screen = pygame.display.set_mode(LOGICAL_SIZE)
+    gl.display_surface = screen
     pygame.display.set_caption("Electro Man - Python Version")
-    # Larger fonts for 2x scaling
-    gl.font["xsmall"] = pygame.font.SysFont("tahoma", 16)
-    gl.font["small"] = pygame.font.SysFont("tahoma", 20)
-    gl.font["normal"] = pygame.font.SysFont("tahoma", 24)
-    gl.font["large"] = pygame.font.SysFont("tahoma", 32)
-    # Create a subsurface at 2x the original offset
-    subsrect = pygame.Rect(gl.OFFSET_X * 2, gl.OFFSET_Y * 2, gl.MAX_X * 2, gl.MAX_Y * 2)
+    # Render coefficient: physical pixels per logical (1280x960) pixel.
+    # Based on the actual surface size (it may differ from the desktop one).
+    # Every draw call multiplies its coordinates/sprites/fonts by it.
+    screen_w, screen_h = screen.get_size()
+    gl.RENDER_SCALE = min(screen_w / LOGICAL_SIZE[0],
+                          screen_h / LOGICAL_SIZE[1])
+    # Render target: the design window multiplied by the coefficient,
+    # centered on the fullscreen surface (proportions preserved).
+    screen.fill((0, 0, 0))
+    try:
+        win_w = min(screen_w, max(1, int(round(LOGICAL_SIZE[0] * gl.RENDER_SCALE))))
+        win_h = min(screen_h, max(1, int(round(LOGICAL_SIZE[1] * gl.RENDER_SCALE))))
+        win_rect = pygame.Rect((screen_w - win_w) // 2,
+                               (screen_h - win_h) // 2,
+                               win_w, win_h)
+        gl.window = screen.subsurface(win_rect)
+    except (pygame.error, ValueError) as e:
+        # Extremely defensive fallback: draw on the whole screen at 1:1
+        logging.warning("Window subsurface failed (%s), using 1:1 screen", e)
+        gl.RENDER_SCALE = 1.0
+        gl.window = screen
+    # System fonts are created at the physical size, so text stays crisp
+    for name, size in (("xsmall", 16), ("small", 20),
+                       ("normal", 24), ("large", 32)):
+        gl.font[name] = pygame.font.SysFont(
+            "tahoma", max(1, int(round(size * gl.RENDER_SCALE))))
+    # Playfield subsurface: offsets and sizes multiplied by the coefficient
+    s = gl.RENDER_SCALE
+    subsrect = pygame.Rect(int(round(gl.OFFSET_X * 2 * s)),
+                           int(round(gl.OFFSET_Y * 2 * s)),
+                           int(round(gl.MAX_X * 2 * s)),
+                           int(round(gl.MAX_Y * 2 * s)))
     gl.display = gl.window.subsurface(subsrect)
 
 
@@ -31,9 +69,20 @@ def clear_screen():
     gl.window.fill(pygame.Color(0, 0, 0))
 
 
+def scale_sprite(image):
+    """Scale a 1x game sprite to the physical render size."""
+    return pygame.transform.scale(
+        image, gl.render_size(image.get_width(), image.get_height()))
+
+
+def present():
+    """Present the already physically-scaled frame."""
+    pygame.display.flip()
+
+
 def show():
     info_lines.show()
-    pygame.display.flip()
+    present()
 
 
 def message(position, txt, font=None, antialias=True,
@@ -41,21 +90,23 @@ def message(position, txt, font=None, antialias=True,
     """
     Display message on the screen. Uses entire surface.
 
-    position - XY(x, y)
+    position - XY(x, y) in window (2x design) coordinates
     txt - string (can contain newlines)
-    font - pygame.Font
+    font - pygame.Font (already created at the physical size)
     antialias - True or False
     color - pygame.Color
 
     Return position of next line as XY(x, y).
     """
     font = gl.font["small"] if font is None else font
+    scale = gl.RENDER_SCALE if gl.RENDER_SCALE else 1.0
     lines = txt.split('\n')
     cpos = XY.from_self(position)
     for line in lines:
-        lsurf = font.render(line, antialias, color)
-        gl.window.blit(lsurf, cpos)
-        cpos.y += int(font.get_height() * 1.05)
+        line_surface = font.render(line, antialias, color)
+        gl.window.blit(line_surface, gl.window_pos(cpos.x, cpos.y))
+        # advance stays in logical units (font height is physical)
+        cpos.y += int(font.get_height() / scale * 1.05)
     return cpos
 
 class InfoLines:
@@ -103,9 +154,10 @@ class DiskInfo:
         # if ((disk_num < 3) || (main_cntr & 0x04))
         if self.disks and (self.disks < 3 or (gl.counter & 0x04)):
             position = XY.from_self(self.position)
-            scaled_disk = pygame.transform.scale2x(self.disk)
+            scaled_disk = scale_sprite(self.disk)
             for d in range(self.disks):
-                gl.display.blit(scaled_disk, XY(position.x * 2, position.y * 2))
+                gl.display.blit(scaled_disk,
+                                gl.render_pos(position.x, position.y))
                 position.x += 22
 
 class LEDBar:
@@ -130,11 +182,12 @@ class LEDBar:
         #self.value = int(time.perf_counter()) % 7
         position = XY.from_self(self.position)
         for led in range(6):
-            scaled_led = pygame.transform.scale2x(self.leds[self.mapping[self.value][led]])
-            gl.display.blit(scaled_led, XY(position.x * 2, position.y * 2))
+            scaled_led = scale_sprite(self.leds[self.mapping[self.value][led]])
+            gl.display.blit(scaled_led,
+                            gl.render_pos(position.x, position.y))
             position.x += 16
-        scaled_led = pygame.transform.scale2x(self.leds[4])
-        gl.display.blit(scaled_led, XY(position.x * 2, position.y * 2))
+        scaled_led = scale_sprite(self.leds[4])
+        gl.display.blit(scaled_led, gl.render_pos(position.x, position.y))
 
 class Indicators:
     def __init__(self):

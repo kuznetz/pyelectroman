@@ -4,6 +4,7 @@ import emglobals as gl
 from emglobals import XY
 import emdata as da
 import emsound as snd
+import emdisplay as di
 import pygame
 import os
 import json
@@ -76,8 +77,10 @@ class Letters:
 
                 if os.path.exists(image_file_path):
                     image = pygame.image.load(image_file_path).convert_alpha()
-                    # Scale 2x to match game display
-                    self.sprites[idx] = pygame.transform.scale2x(image)
+                    # Scale by the render coefficient (2x * RENDER_SCALE)
+                    self.sprites[idx] = pygame.transform.scale(
+                        image, gl.render_size(image.get_width(),
+                                              image.get_height()))
                 else:
                     logging.warning("Letters sprite not found: %s", image_file_path)
 
@@ -94,19 +97,20 @@ class Letters:
         if not hasattr(self, "_sprites_4x"):
             self._sprites_4x = {}
         if idx not in self._sprites_4x:
-            sprite = self.sprites.get(idx)  # already 2x
-            self._sprites_4x[idx] = (pygame.transform.scale2x(sprite)
-                                     if sprite else None)
+            sprite = self.sprites.get(idx)  # already 2x * RENDER_SCALE
+            self._sprites_4x[idx] = (
+                pygame.transform.scale(
+                    sprite, (sprite.get_width() * 2, sprite.get_height() * 2))
+                if sprite else None)
         return self._sprites_4x[idx]
 
     def print_text(self, surface, text, origin, area=(320, 200)):
         """
-        Port of the original print() (EB.C:319-350) at 4x scale (the
-        in-game pixel scale), for the title/level-completed/
-        congratulations screens and in-game prompts. '*' in text is a
-        line separator. origin is the XY of the target area's top-left
-        corner on the window, area its size in original pixels
-        (1 original pixel = 4 window pixels).
+        Port of the original print() (EB.C:319-350) at 4x * RENDER_SCALE,
+        for the title/level-completed/congratulations screens and in-game
+        prompts. '*' in text is a line separator. origin is the XY of the
+        target area's top-left corner in physical window pixels, area its
+        size in original pixels.
 
         Deviation: the C px=py=255 mode centers on the bordered game
         playfield (center 180,120 of the 320x200 screen). The port shows
@@ -116,6 +120,7 @@ class Letters:
         text = text.lower()
         if not text:
             return
+        pixel = 4.0 * gl.RENDER_SCALE  # original pixel -> physical pixels
         lines = text.split('*')
         # center the text block vertically on the area
         y = (area[1] - 24 * len(lines)) // 2
@@ -130,7 +135,8 @@ class Letters:
                 sprite = self._sprite_4x(idx)
                 if sprite:
                     surface.blit(sprite,
-                                 (origin.x + x * 4, origin.y + y * 4))
+                                 (origin.x + int(round(x * pixel)),
+                                  origin.y + int(round(y * pixel))))
                 x += 24
             y += 24
 
@@ -145,11 +151,11 @@ class Letters:
         Args:
             surface: pygame surface to draw on
             text: string to render (uppercase letters, numbers, some punctuation)
-            position: XY position for top-left of text
+            position: XY position for top-left of text (window coordinates)
             color_mod: optional tuple (r, g, b) to modulate color (for graying out)
 
         Returns:
-            XY position after the rendered text
+            XY position after the rendered text (window coordinates)
         """
         text = text.upper()
         x, y = position.x, position.y
@@ -170,7 +176,7 @@ class Letters:
                     sprite = sprite.copy()
                     sprite.fill(color_mod, special_flags=pygame.BLEND_MULT)
 
-                surface.blit(sprite, (x, y))
+                surface.blit(sprite, gl.window_pos(x, y))
 
             x += self.CHAR_WIDTH * 2
 
@@ -189,8 +195,8 @@ class Letters:
         Returns:
             XY position after the rendered text
         """
-        text_width = self.get_text_width(text)
-        surface_width = surface.get_width()
+        text_width = self.get_text_width(text)  # in window coordinates
+        surface_width = int(round(surface.get_width() / gl.RENDER_SCALE))
         x = (surface_width - text_width) // 2
         return self.render_text(surface, text, XY(x, y), color_mod)
 
@@ -502,7 +508,9 @@ class MainMenu:
 
         instructions = "UP/DOWN: Select   ENTER: Confirm   ESC: Quit"
         text_surface = font.render(instructions, True, (150, 150, 150))
-        text_rect = text_surface.get_rect(center=(surface.get_width() // 2, self.INSTRUCTIONS_Y))
+        text_rect = text_surface.get_rect(
+            center=(surface.get_width() // 2,
+                    int(round(self.INSTRUCTIONS_Y * gl.RENDER_SCALE))))
         surface.blit(text_surface, text_rect)
 
     def run(self):
@@ -530,7 +538,7 @@ class MainMenu:
             self.render(gl.window)
 
             # Show
-            pygame.display.flip()
+            di.present()
 
             # Maintain 20 FPS to match game
             clock.tick(20)
@@ -551,14 +559,18 @@ class MusicScreen:
     screen; Esc brings up the original "exit to dos? (y or n)" confirmation.
     """
 
-    # 320x200 bitmap scaled 4x, centered in the 1280x960 window
-    BMP_W, BMP_H = 1280, 800
-    ORIGIN = XY((1280 - BMP_W) // 2, (960 - BMP_H) // 2)
+    # 320x200 bitmap scaled by 4 * RENDER_SCALE, centered in the window
+    BASE_W, BASE_H = 1280, 800
 
     def __init__(self, bmp1, bmp2, message, song):
         self.letters = Letters()
         self.letters.load()
         self.message = message
+        # physical bitmap size and its centered origin on the window
+        self.bmp_w = max(1, int(round(self.BASE_W * gl.RENDER_SCALE)))
+        self.bmp_h = max(1, int(round(self.BASE_H * gl.RENDER_SCALE)))
+        self.origin = XY((gl.window.get_width() - self.bmp_w) // 2,
+                         (gl.window.get_height() - self.bmp_h) // 2)
         self.scr1 = self._load_bmp(bmp1)
         self.scr2 = self._load_bmp(bmp2) if bmp2 != bmp1 else self.scr1
         self.music = snd.MusicPlayer()
@@ -567,16 +579,14 @@ class MusicScreen:
         self.esc_flag = False
         self.result = None
 
-    @staticmethod
-    def _load_bmp(name):
+    def _load_bmp(self, name):
         path = os.path.join(gl.data_folder, name)
         try:
             image = pygame.image.load(path).convert()
-            return pygame.transform.scale(
-                image, (MusicScreen.BMP_W, MusicScreen.BMP_H))
+            return pygame.transform.scale(image, (self.bmp_w, self.bmp_h))
         except (pygame.error, FileNotFoundError) as e:
             logging.error("Failed to load bitmap %s: %s", path, e)
-            surface = pygame.Surface((MusicScreen.BMP_W, MusicScreen.BMP_H))
+            surface = pygame.Surface((self.bmp_w, self.bmp_h))
             surface.fill((0, 0, 64))
             return surface
 
@@ -590,7 +600,7 @@ class MusicScreen:
 
     def render(self):
         gl.window.fill((0, 0, 0))
-        origin = self.ORIGIN
+        origin = self.origin
         gl.window.blit(self.current_image(), (origin.x, origin.y))
         if self.esc_flag:
             # Cover the screen with filler tiles + confirmation (EB.C:1227-1234).
@@ -599,17 +609,17 @@ class MusicScreen:
             # whole bitmap is tiled symmetrically instead.
             if self.overlay_tile:
                 gl.window.set_clip(pygame.Rect(origin.x, origin.y,
-                                               self.BMP_W, self.BMP_H))
+                                               self.bmp_w, self.bmp_h))
                 tile_size = self.overlay_tile.get_width()
-                for x in range(0, self.BMP_W, tile_size):
-                    for y in range(0, self.BMP_H, tile_size):
+                for x in range(0, self.bmp_w, tile_size):
+                    for y in range(0, self.bmp_h, tile_size):
                         gl.window.blit(self.overlay_tile,
                                        (origin.x + x, origin.y + y))
                 gl.window.set_clip(None)
             self.letters.print_text(gl.window, "exit to dos?*(y or n)", origin)
         else:
             self.letters.print_text(gl.window, self.message, origin)
-        pygame.display.flip()
+        di.present()
 
     def handle_input(self):
         for event in pygame.event.get():
@@ -640,14 +650,25 @@ class MusicScreen:
 
 
 def _load_info_sprite(idx):
-    """Load a single info-set sprite scaled 4x (24px -> 96px, in-game scale)."""
+    """Load a single info-set sprite scaled by 4 * RENDER_SCALE."""
     path = os.path.join(gl.data_folder, "info", f"info_{idx:02d}.png")
     try:
         image = pygame.image.load(path).convert_alpha()
-        return pygame.transform.scale2x(pygame.transform.scale2x(image))
+        pixel = 4.0 * gl.RENDER_SCALE
+        size = (max(1, int(round(image.get_width() * pixel))),
+                max(1, int(round(image.get_height() * pixel))))
+        return pygame.transform.scale(image, size)
     except (pygame.error, FileNotFoundError) as e:
         logging.warning("Failed to load info sprite %s: %s", path, e)
         return None
+
+
+def _music_origin():
+    """Top-left pixel of the music bitmap (1280x800 base) on the window."""
+    bmp_w = max(1, int(round(1280 * gl.RENDER_SCALE)))
+    bmp_h = max(1, int(round(800 * gl.RENDER_SCALE)))
+    return XY((gl.window.get_width() - bmp_w) // 2,
+              (gl.window.get_height() - bmp_h) // 2)
 
 
 def show_loading_animation(frames=8):
@@ -659,19 +680,21 @@ def show_loading_animation(frames=8):
     tiles = {n: _load_info_sprite(n) for n in (12, 13, 14, 15)}
     if not all(tiles.values()):
         return
-    origin = MusicScreen.ORIGIN
+    origin = _music_origin()
+    pixel = 4.0 * gl.RENDER_SCALE
     clock = pygame.time.Clock()
     for b in range(frames):
         gl.window.fill((0, 0, 0))
         for i in range(24, 14 * 24, 24):
-            gl.window.blit(tiles[15], (origin.x + i * 4,
-                                       origin.y + 8 * 24 * 4))
-        gl.window.blit(tiles[14], (origin.x + (13 * 24 - 6) * 4,
-                                   origin.y + 8 * 24 * 4))
+            gl.window.blit(tiles[15], (origin.x + int(round(i * pixel)),
+                                       origin.y + int(round(8 * 24 * pixel))))
+        gl.window.blit(tiles[14],
+                       (origin.x + int(round((13 * 24 - 6) * pixel)),
+                        origin.y + int(round(8 * 24 * pixel))))
         gl.window.blit(tiles[13] if b & 1 else tiles[12],
-                       (origin.x + (12 * 24 - 6) * 4,
-                        origin.y + 8 * 24 * 4))
-        pygame.display.flip()
+                       (origin.x + int(round((12 * 24 - 6) * pixel)),
+                        origin.y + int(round(8 * 24 * pixel))))
+        di.present()
         pygame.event.pump()
         clock.tick(20)
 
@@ -688,15 +711,19 @@ def ask_confirmation(message):
     letters.load()
     tile = _load_info_sprite(6)
     snd.play_sound('ask')
-    # gameplay playfield rect on the window (13x8 tiles of 96px)
-    origin = XY(gl.OFFSET_X * 2, gl.OFFSET_Y * 2)
+    # gameplay playfield rect on the window (13x8 tiles, physical pixels)
+    scale = gl.RENDER_SCALE
+    origin = XY(int(round(gl.OFFSET_X * 2 * scale)),
+                int(round(gl.OFFSET_Y * 2 * scale)))
     area = (gl.SCREEN_X * 24, gl.SCREEN_Y * 24)  # in original pixels
+    tile_step = int(round(96 * scale))
     if tile:
         for x in range(gl.SCREEN_X):
             for y in range(gl.SCREEN_Y):
-                gl.window.blit(tile, (origin.x + x * 96, origin.y + y * 96))
+                gl.window.blit(tile, (origin.x + x * tile_step,
+                                      origin.y + y * tile_step))
     letters.print_text(gl.window, message, origin, area)
-    pygame.display.flip()
+    di.present()
     clock = pygame.time.Clock()
     while True:
         for event in pygame.event.get():

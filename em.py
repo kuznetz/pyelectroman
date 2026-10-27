@@ -98,9 +98,11 @@ class Gameplay:
         pixels[(scr % 16) * 2 + 0][(scr // 16) * 2 + 1] = CURRENT
         pixels[(scr % 16) * 2 + 1][(scr // 16) * 2 + 1] = CURRENT
         del pixels
-        # Scale map 2x for larger window
-        scaled_map = pygame.transform.scale(screens_map_copy, (64, 64))
-        gl.window.blit(scaled_map, pos)
+        # Scale map by the render coefficient
+        map_size = max(1, int(round(64 * gl.RENDER_SCALE)))
+        scaled_map = pygame.transform.scale(screens_map_copy,
+                                            (map_size, map_size))
+        gl.window.blit(scaled_map, gl.window_pos(pos[0], pos[1]))
 
     def show_info(self):
         """Display status line"""
