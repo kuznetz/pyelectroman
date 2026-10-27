@@ -161,6 +161,12 @@ class Entity:
         """
         return self.position.copy()
 
+    def world_rect(self):
+        """Return the entity's bounding box in world coordinates."""
+        rect = self.get_bbox().copy()
+        rect.move_ip(self.get_position())
+        return rect
+
     def get_x(self):
         return self.position.x
 
@@ -185,17 +191,12 @@ class Entity:
         return self.sprites[self.frame].touch
 
     def vanish(self):
-        """Remove itself from its original screen"""
+        """Remove itself from the world and from the level definition."""
         logging.debug("vanish() called for %s at %s", self.name(), self.position)
-        # remove from the current screen first
-        try:
-            gl.screen_manager.get_screen().active.remove(self)
-            logging.debug("  Removed from current screen.active")
-        except ValueError:
-            logging.debug("  NOT in current screen.active")
-        # remove from the level definition
-        gl.screen_manager.delete_object(gl.screen_manager.get_screen_number(),
-                                        self.position)
+        world = gl.screen_manager
+        if world is not None:
+            world.remove(self)
+            logging.debug("  Removed from the world")
 
     def update(self):
         """Standard empty update method."""
@@ -265,28 +266,24 @@ class Entity:
                              gl.render_pos(sp.x, sp.y),
                              gl.render_pos(ep.x, ep.y))
 
-    def check_ground(self, screen):
+    def check_ground(self, screen=None):
         """
         Return distance from the bottom of entity's bounding box to the ground.
         Negative value means the entity BB is already in the ground (collides
         at the start).
-        Offset moves starting point before check is made.
+
+        ``screen`` is accepted for backward compatibility only: collisions are
+        always queried from the seamless world.
         """
         result = (gl.SCREEN_Y * (gl.SPRITE_Y + 1))
-        if screen:
+        world = gl.screen_manager
+        if world is not None:
             bbox = self.get_bbox()
             x = bbox.left + self.get_x()
             y = bbox.top + bbox.height + self.get_y()
             w = bbox.width
-            h = (gl.SCREEN_Y * gl.SPRITE_Y) - y
-            me = pygame.Rect(x, y, w, h)
-            #pygame.draw.rect(gl.display, pygame.Color(255, 255, 255), me, 1)
-            collided = []
-            for obj in screen.collisions:
-                you = obj.get_bbox().copy()
-                you.move_ip(obj.get_position())
-                if me.colliderect(you):
-                    collided.append(obj)
+            me = pygame.Rect(x, y, w, gl.MAX_Y)
+            collided = world.colliders_in_rect(me)
             if collided:
                 # sorted by y position - probably not necessary anyway
                 collided.sort(key=lambda o: o.get_top())
@@ -294,42 +291,61 @@ class Entity:
                     # needs to collide from top
                     if coll.get_sides()["T"]:
                         ctop = coll.get_top()
-                        result = ctop - y
-                        break
+                        if ctop < y:
+                            continue
+                        return ctop - y
+            # Nothing solid below. If the room below does not exist the
+            # "void floor" of the current room acts as ground, so the hero
+            # does not fall forever at an open map edge.
+            gx = (x + w // 2) // gl.MAX_X
+            upper_gy = (y - 1) // gl.MAX_Y
+            if not world.room_exists(gx, upper_gy + 1):
+                result = max(0, (upper_gy + 1) * gl.MAX_Y - y)
         return result
 
-    def check_collision(self, offset, screen, ignore_ground=False):
-        """Check collision at offset."""
+    def check_collision(self, offset, screen=None, ignore_ground=False):
+        """Check collision at offset (against the seamless world)."""
         collided = False
-        if screen:
+        world = gl.screen_manager
+        if world is not None:
             me = self.get_bbox().copy()
             me.move_ip(self.get_position() + offset)
-            for obj in screen.collisions:
-                you = obj.get_bbox().copy()
-                you.move_ip(obj.get_position())
-                if me.colliderect(you):
-                    sides = obj.get_sides()
-                    if (offset[0] > 0) and sides["L"]:
-                        # move right and left side
-                        collided = collided if collided else True
-                    elif (offset[0] < 0) and sides["R"]:
-                        # move left and right side
-                        collided = collided if collided else True
-                    elif (offset[1] > 0) and sides["T"] and not ignore_ground:
-                        # move down and top side
-                        collided = collided if collided else True
-                    elif (offset[1] < 0) and sides["B"]:
-                        # move up and bottom side
-                        collided = collided if collided else True
+            for obj in world.colliders_in_rect(me):
+                if obj is self:
+                    continue
+                sides = obj.get_sides()
+                if (offset[0] > 0) and sides["L"]:
+                    # move right and left side
+                    collided = True
+                elif (offset[0] < 0) and sides["R"]:
+                    # move left and right side
+                    collided = True
+                elif (offset[1] > 0) and sides["T"] and not ignore_ground:
+                    # move down and top side
+                    collided = True
+                elif (offset[1] < 0) and sides["B"]:
+                    # move up and bottom side
+                    collided = True
+                if collided:
+                    break
+            if not collided and world.blocks_void(self.get_bbox(),
+                                                  self.get_position(),
+                                                  offset):
+                # "Void = wall": never leave the existing rooms
+                collided = True
         return collided
 
-    def get_touching(self, offset, screen):
+    def get_touching(self, offset, screen=None):
         """Return objects touching at offset."""
         touched = []
-        if screen:
+        world = gl.screen_manager
+        if world is not None:
             me = self.get_bbox().copy()
             me.move_ip(self.get_position() + offset)
-            for obj in screen.active:
+            search = me.inflate(gl.SPRITE_X * 2, gl.SPRITE_Y * 2)
+            for obj in world.entities_in_rect(search):
+                if obj is self:
+                    continue
                 you = obj.get_bbox().copy()
                 you.move_ip(obj.get_position())
                 if me.colliderect(you) and obj.is_touchable():
@@ -372,120 +388,420 @@ class Entity:
     def set_initial_delay(self, mode, param):
         """Set initial delay depending on mode or object's position."""
         pos = self.get_position()
+        # Entity positions are world coordinates; the original game used the
+        # tile index inside the room, so take it modulo the room size.
+        tile_x, tile_y = gl.local_tile(pos.x, pos.y)
         if mode == 0:
-            self.delay = ((pos.x // gl.SPRITE_X)
-                          + (pos.y // gl.SPRITE_Y)) % (param + 1)
+            self.delay = (tile_x + tile_y) % (param + 1)
         elif mode == 1:
-            self.delay = (pos.x // gl.SPRITE_X) % (param + 1)
+            self.delay = tile_x % (param + 1)
         elif mode == 2:
-            self.delay = (pos.y // gl.SPRITE_Y) % (param + 1)
+            self.delay = tile_y % (param + 1)
         elif mode == 3:
             self.delay = 0
         elif mode == 4:
             self.delay = gl.random(param + 1)
         elif mode == 5:
-            self.delay = gl.screen_randoms[pos.x // gl.SPRITE_X] % (param + 1)
+            self.delay = gl.screen_randoms[tile_x] % (param + 1)
         elif mode == 6:
-            self.delay = gl.screen_randoms[pos.y // gl.SPRITE_Y] % (param + 1)
+            self.delay = gl.screen_randoms[tile_y] % (param + 1)
         elif mode == 7:
             self.frame = gl.random(len(self.sprites))
             self.delay = 0
 
-class ScreenManager:
+class World:
     """
-    Screen manager class.
-    Manages rooms (screens) from loaded level.
-    Singleton by design.
-    """
-    def __init__(self):
-        self.current_screen = 0  # current screen
-        self.screens = None  # all screens
-        self.screen = None  # current screen definition
-        self.new_objects = [] # new objects created for current frame
+    The whole level as a single seamless space.
 
+    Replaces the page-based ScreenManager: objects keep world pixel
+    coordinates, collisions are queried through a spatial hash and the only
+    "screen" left is a room, used for occupancy (void rule), rendering and
+    save games. The attribute name ``gl.screen_manager`` is kept so the rest
+    of the code keeps working.
+    """
+    CELL = gl.SPRITE_X  # spatial hash cell size (one tile)
+
+    def __init__(self):
+        self.screens = []  # room -> emdata.Screen (live level data)
+        self.occupancy = bytearray(gl.ROOMS_TOTAL)  # 1 = room exists
+        self.entities = []  # every live active object
+        self.new_objects = []  # objects spawned in the current frame
+        self.colliders = []  # every static collider
+        self.collision_grid = {}  # (cx, cy) -> list of colliders
+        self.flags = {}  # runtime marks (broken/removed objects)
+        self.loose = []  # objects spawned outside every existing room
+        self.current_screen = 0  # room containing the player
+
+    # ------------------------------------------------------------------
+    # level loading
+    # ------------------------------------------------------------------
     def add_screens(self, screens):
-        self.screens = screens
+        """Load room definitions (kept name for compatibility)."""
+        self.screens = screens if screens is not None else []
+        self.rebuild()
+
+    def load_level(self, level=None):
+        """(Re)build the world from the current level data."""
+        level = level if level is not None else gl.level
+        self.add_screens(level.get_screens())
+
+    def rebuild(self):
+        """Rebuild occupancy, active entities and the collision index."""
+        self.occupancy = bytearray(gl.ROOMS_TOTAL)
+        self.entities = []
+        self.loose = []
+        self.colliders = []
+        self.collision_grid = {}
+        for number, screen in enumerate(self.screens[:gl.ROOMS_TOTAL]):
+            if not screen:
+                continue
+            self.occupancy[number] = 1
+            self.entities.extend(screen.active)
+            for collider in screen.collisions:
+                self._grid_add(collider)
+        logging.info("World built: %d rooms, %d active, %d colliders",
+                     sum(self.occupancy), len(self.entities),
+                     len(self.colliders))
+
+    def rebuild_colliders(self):
+        """Rebuild only the static collision index (level data unchanged)."""
+        self.colliders = []
+        self.collision_grid = {}
+        for screen in self.screens[:gl.ROOMS_TOTAL]:
+            if not screen:
+                continue
+            for collider in screen.collisions:
+                self._grid_add(collider)
+
+    def _grid_add(self, collider):
+        rect = collider.get_bbox().copy()
+        rect.move_ip(collider.get_position())
+        self.colliders.append(collider)
+        for cx in range(rect.left // self.CELL, rect.right // self.CELL + 1):
+            for cy in range(rect.top // self.CELL, rect.bottom // self.CELL + 1):
+                self.collision_grid.setdefault((cx, cy), []).append(collider)
+
+    # ------------------------------------------------------------------
+    # rooms / occupancy (the "void = wall" rule)
+    # ------------------------------------------------------------------
+    def get_screens(self):
+        return self.screens
 
     def get_screen(self):
-        """
-        Return active screen definition.
-        """
-        return self.screen
-
-    def get_screens(self):
-        """
-        Return all screen definitions.
-        """
-        return self.screens
+        """Return the room containing the player (compatibility helper)."""
+        if 0 <= self.current_screen < len(self.screens):
+            return self.screens[self.current_screen]
+        return None
 
     def get_screen_number(self):
         return self.current_screen
 
     def inspect_screen(self, screen_number):
-        """
-        Return screen definition for inspection.
-        Don't initialize it (the current screen won't change.
-        """
+        """Return a room definition without activating it."""
         if (screen_number < 0) or (screen_number > 255):
             raise ValueError("Screen number out of range (0, 255).")
         if self.screens:
             return self.screens[screen_number]
+        return None
 
     def change_screen(self, screen_number):
+        """Track the player's room (no level data is re-initialized)."""
         if (screen_number < 0) or (screen_number > 255):
             raise ValueError("Screen number out of range (0, 255).")
-        if self.screens:
-            gl.init_screen_randoms(screen_number)
-            self.current_screen = screen_number
-            # changing screen reinitializes its content
-            self.screen = da.Screen()
-            cs = self.screens[self.current_screen]
-            if cs:
-                self.screen.background = copy.copy(cs.background)
-                self.screen.collisions = copy.copy(cs.collisions)
-                self.screen.active = copy.copy(cs.active)
-                logging.debug("change_screen(%d): Loaded %d active entities from level data",
-                             screen_number, len(cs.active))
-            else:
-                self.screen = None
+        self.current_screen = screen_number
 
-    def delete_object(self, screen, position):
-        cs = self.screens[screen]
-        found = False
-        for obj in cs.active:
-            if obj.position == position:
-                cs.active.remove(obj)
-                logging.debug("delete_object: Removed %s at %s from screen %d level data",
-                             obj.name(), position, screen)
-                found = True
-                break
-        if not found:
-            logging.debug("delete_object: No object found at %s in screen %d level data",
-                         position, screen)
+    def update_current_room(self, position=None):
+        """Update current_screen from a world position (player by default)."""
+        if position is None and gl.player is not None:
+            position = gl.player.get_position()
+        if position is not None:
+            self.current_screen = gl.room_of(position.x, position.y)
+        return self.current_screen
 
-    def add_to_level_data(self, screen, entity):
-        """Add an entity to the level definition so it persists across screen changes."""
-        cs = self.screens[screen]
-        if cs:
-            cs.active.append(entity)
-            logging.debug("add_to_level_data: Added %s at %s to screen %d",
-                         entity.name(), entity.position, screen)
+    def room_exists(self, gx, gy):
+        """Return True if the room (gx, gy) exists in the level."""
+        if not (0 <= gx < gl.ROOMS_X and 0 <= gy < gl.ROOMS_Y):
+            return False
+        return self.occupancy[gy * gl.ROOMS_X + gx] != 0
 
-    def add_active(self, object):
+    def is_void_at(self, rect):
+        """Return True when any corner of rect lies in a non-existing room."""
+        for x in (rect.left, rect.right - 1):
+            for y in (rect.top, rect.bottom - 1):
+                if not self.room_exists(x // gl.MAX_X, y // gl.MAX_Y):
+                    return True
+        return False
+
+    def blocks_void(self, bbox, position, offset):
+        """
+        Check the "void = wall" rule for a move.
+
+        Only the leading edge of the proposed box is tested, so an entity
+        that already straddles a seam is not locked in place.
+        """
+        ox, oy = offset
+        rect = bbox.copy()
+        rect.move_ip(position.x + ox, position.y + oy)
+        if ox and not oy:
+            edge = rect.right - 1 if ox > 0 else rect.left
+            points = ((edge, rect.top), (edge, rect.centery),
+                      (edge, rect.bottom - 1))
+        elif oy and not ox:
+            edge = rect.bottom - 1 if oy > 0 else rect.top
+            points = ((rect.left, edge), (rect.centerx, edge),
+                      (rect.right - 1, edge))
+        else:
+            points = ((rect.left, rect.top), (rect.right - 1, rect.top),
+                      (rect.left, rect.bottom - 1),
+                      (rect.right - 1, rect.bottom - 1))
+        for x, y in points:
+            if not self.room_exists(x // gl.MAX_X, y // gl.MAX_Y):
+                return True
+        return False
+
+    def visible_rooms(self, rect):
+        """Return room definitions intersecting rect (world)."""
+        result = []
+        gx0 = max(0, rect.left // gl.MAX_X)
+        gx1 = min(gl.ROOMS_X - 1, rect.right // gl.MAX_X)
+        gy0 = max(0, rect.top // gl.MAX_Y)
+        gy1 = min(gl.ROOMS_Y - 1, rect.bottom // gl.MAX_Y)
+        for gy in range(gy0, gy1 + 1):
+            for gx in range(gx0, gx1 + 1):
+                index = gy * gl.ROOMS_X + gx
+                if 0 <= index < len(self.screens) and self.screens[index]:
+                    result.append(self.screens[index])
+        return result
+
+    # ------------------------------------------------------------------
+    # collision / entity queries
+    # ------------------------------------------------------------------
+    def colliders_in_rect(self, rect):
+        """Return static colliders overlapping rect (world coordinates)."""
+        result = []
+        seen = set()
+        cell = self.CELL
+        for cx in range(rect.left // cell, rect.right // cell + 1):
+            for cy in range(rect.top // cell, rect.bottom // cell + 1):
+                for collider in self.collision_grid.get((cx, cy), ()):
+                    key = id(collider)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    you = collider.get_bbox().copy()
+                    you.move_ip(collider.get_position())
+                    if rect.colliderect(you):
+                        result.append(collider)
+        return result
+
+    # Active entities are indexed by room (their spawn room), so a query
+    # only has to look at the rooms around it. Half a room of padding keeps
+    # objects that crossed a seam into a neighbouring room visible.
+    ENTITY_PAD = (gl.MAX_X // 2, gl.MAX_Y // 2)
+
+    def entities_in_rect(self, rect):
+        """Return active entities overlapping rect (world coordinates)."""
+        search = rect.inflate(self.ENTITY_PAD[0], self.ENTITY_PAD[1])
+        result = []
+        seen = set()
+        for screen in self.visible_rooms(search):
+            for entity in screen.active:
+                key = id(entity)
+                if key in seen:
+                    continue
+                seen.add(key)
+                if entity.world_rect().colliderect(rect):
+                    result.append(entity)
+        for entity in self.loose:
+            if id(entity) in seen:
+                continue
+            if entity.world_rect().colliderect(rect):
+                result.append(entity)
+        return result
+
+    # ------------------------------------------------------------------
+    # spawning / removal
+    # ------------------------------------------------------------------
+    def add_active(self, obj):
         """
         Add new objects to waiting queue.
         They will be displayed but not updated in this frame.
         """
-        self.new_objects.append(object)
+        self.new_objects.append(obj)
+
+    def spawn(self, obj):
+        """Register an object in the world and in its room's level data."""
+        if obj not in self.entities:
+            self.entities.append(obj)
+        room = gl.room_of(obj.get_position().x, obj.get_position().y)
+        screen = None
+        if 0 <= room < len(self.screens):
+            screen = self.screens[room]
+        if screen is not None:
+            if obj not in screen.active:
+                screen.active.append(obj)
+        elif obj not in self.loose:
+            # spawned outside any existing room (map edge): keep it world
+            # visible, but it has no room in the level data
+            self.loose.append(obj)
+        return obj
+
+    def remove(self, obj):
+        """Remove an object from the world and from the level data."""
+        removed = False
+        if obj in self.entities:
+            self.entities.remove(obj)
+            removed = True
+        if obj in self.loose:
+            self.loose.remove(obj)
+            removed = True
+        home = getattr(obj, "home_position", None)
+        if not isinstance(home, XY):
+            home = obj.get_position()
+        room = gl.room_of(home.x, home.y)
+        if 0 <= room < len(self.screens):
+            screen = self.screens[room]
+            if screen is not None and obj in screen.active:
+                screen.active.remove(obj)
+                removed = True
+        return removed
+
+    def add_to_level_data(self, screen, entity):
+        """Add an entity to the level definition (compatibility helper)."""
+        self.spawn(entity)
 
     def update_active(self):
-        """
-        Update list of active objects with objects from new objects queue.
-        """
+        """Move queued objects into the world (once per frame)."""
         if self.new_objects:
-            self.screen.active.extend(self.new_objects)
+            for obj in self.new_objects:
+                self.spawn(obj)
             self.new_objects = []
 
+    # ------------------------------------------------------------------
+    # camera
+    # ------------------------------------------------------------------
+    def activity_rect(self):
+        """Viewport inflated by half a viewport in every direction."""
+        cam = gl.camera
+        if cam is None:
+            return pygame.Rect(0, 0, gl.MAX_X, gl.MAX_Y).inflate(gl.MAX_X,
+                                                                 gl.MAX_Y)
+        return cam.activity_rect()
+
+    def _run_x(self, gx, gy):
+        """Contiguous run of existing rooms in a row, containing (gx, gy)."""
+        if not self.room_exists(gx, gy):
+            return None
+        lo = gx
+        while self.room_exists(lo - 1, gy):
+            lo -= 1
+        hi = gx
+        while self.room_exists(hi + 1, gy):
+            hi += 1
+        return lo, hi
+
+    def _run_y(self, gx, gy):
+        """Contiguous run of existing rooms in a column, containing (gx, gy)."""
+        if not self.room_exists(gx, gy):
+            return None
+        lo = gy
+        while self.room_exists(gx, lo - 1):
+            lo -= 1
+        hi = gy
+        while self.room_exists(gx, hi + 1):
+            hi += 1
+        return lo, hi
+
+    @staticmethod
+    def _clamp_to_runs(value, intervals, focus_run, size):
+        """Clamp value into the intersection of intervals (or focus run)."""
+        if intervals:
+            lo = max(interval[0] for interval in intervals)
+            hi = min(interval[1] for interval in intervals)
+            if lo <= hi:
+                return max(lo, min(hi, value))
+        if focus_run:
+            lo, hi = focus_run[0] * size, focus_run[1] * size
+            return max(lo, min(hi, value))
+        return value
+
+    def _clamp_camera_y(self, y, camera_x, focus_x, focus_y):
+        gx0 = max(0, min(gl.ROOMS_X - 1, camera_x // gl.MAX_X))
+        gx1 = max(0, min(gl.ROOMS_X - 1,
+                         (camera_x + gl.MAX_X - 1) // gl.MAX_X))
+        gy0 = max(0, min(gl.ROOMS_Y - 1, y // gl.MAX_Y))
+        gy1 = max(0, min(gl.ROOMS_Y - 1, (y + gl.MAX_Y - 1) // gl.MAX_Y))
+        intervals = []
+        for gx in range(gx0, gx1 + 1):
+            for gy in range(gy0, gy1 + 1):
+                run = self._run_y(gx, gy)
+                if run:
+                    intervals.append((run[0] * gl.MAX_Y, run[1] * gl.MAX_Y))
+        fx = max(0, min(gl.ROOMS_X - 1, focus_x // gl.MAX_X))
+        fy = max(0, min(gl.ROOMS_Y - 1, focus_y // gl.MAX_Y))
+        return self._clamp_to_runs(y, intervals, self._run_y(fx, fy),
+                                   gl.MAX_Y)
+
+    def _clamp_camera_x(self, x, camera_y, focus_x, focus_y):
+        gy0 = max(0, min(gl.ROOMS_Y - 1, camera_y // gl.MAX_Y))
+        gy1 = max(0, min(gl.ROOMS_Y - 1,
+                         (camera_y + gl.MAX_Y - 1) // gl.MAX_Y))
+        gx0 = max(0, min(gl.ROOMS_X - 1, x // gl.MAX_X))
+        gx1 = max(0, min(gl.ROOMS_X - 1, (x + gl.MAX_X - 1) // gl.MAX_X))
+        intervals = []
+        for gy in range(gy0, gy1 + 1):
+            for gx in range(gx0, gx1 + 1):
+                run = self._run_x(gx, gy)
+                if run:
+                    intervals.append((run[0] * gl.MAX_X, run[1] * gl.MAX_X))
+        fy = max(0, min(gl.ROOMS_Y - 1, focus_y // gl.MAX_Y))
+        fx = max(0, min(gl.ROOMS_X - 1, focus_x // gl.MAX_X))
+        return self._clamp_to_runs(x, intervals, self._run_x(fx, fy),
+                                   gl.MAX_X)
+
+    def center_camera(self, focus_x, focus_y):
+        """
+        Center the camera on (focus_x, focus_y), clamped so no missing room
+        ever shows up in the viewport. Two passes (vertical -> horizontal ->
+        vertical) protect concave corners.
+        """
+        cam = gl.camera
+        if cam is None:
+            return
+        x = focus_x - gl.MAX_X // 2
+        y = focus_y - gl.MAX_Y // 2
+        y = self._clamp_camera_y(y, x, focus_x, focus_y)
+        x = self._clamp_camera_x(x, y, focus_x, focus_y)
+        y = self._clamp_camera_y(y, x, focus_x, focus_y)
+        cam.x = int(x) & ~1
+        cam.y = int(y) & ~1
+
+    def snap_camera(self):
+        """Center the camera on the player immediately."""
+        if gl.camera is None or gl.player is None:
+            return
+        pos = gl.player.get_position()
+        bbox = gl.player.get_bbox()
+        self.center_camera(pos.x + bbox.centerx, pos.y + bbox.centery)
+        self.update_current_room(pos)
+
+    def update_camera(self):
+        """Follow the player (or keep the viewport on the player's room)."""
+        cam = gl.camera
+        if cam is None or gl.player is None:
+            return
+        pos = gl.player.get_position()
+        bbox = gl.player.get_bbox()
+        if cam.enabled:
+            self.center_camera(pos.x + bbox.centerx, pos.y + bbox.centery)
+        else:
+            origin = gl.room_origin(gl.room_of(pos.x, pos.y))
+            cam.x, cam.y = origin.x, origin.y
+        self.update_current_room(pos)
+
+    # ------------------------------------------------------------------
+    # level reset (player death)
+    # ------------------------------------------------------------------
     def reset_level(self):
         """
         Reset level to pristine state on player death.
@@ -493,27 +809,33 @@ class ScreenManager:
         - memcpy(map, level_map, sizeof(map)) - restore all screens
         - Remove already collected disks from restored screens
         """
-        # Recreate all screens from level data (EB.C:1390)
-        self.screens = gl.level.reset_screens()
+        self.add_screens(gl.level.reset_screens())
 
         # Remove collected disks from the restored level (EB.C:1391-1395)
         # In C: for (i = 0; i < disk_num; i++) MAP_REMOVE(disk_x[i], disk_y[i])
-        for screen_num, position in gl.disk_positions:
-            cs = self.screens[screen_num]
-            if cs:
-                for obj in cs.active[:]:  # iterate over copy to allow removal
-                    if obj.position == position:
-                        cs.active.remove(obj)
-                        logging.debug("reset_level: Removed collected disk at %s from screen %d",
-                                     position, screen_num)
-                        break
+        for position in list(gl.disk_positions):
+            if not isinstance(position, XY):
+                continue
+            for entity in list(self.entities):
+                if entity.get_position() == position:
+                    self.remove(entity)
+                    logging.debug("reset_level: Removed collected disk at %s",
+                                  position)
+                    break
 
-        logging.info("reset_level: Level reset, %d collected disks preserved", len(gl.disk_positions))
+        logging.info("reset_level: Level reset, %d collected disks preserved",
+                     len(gl.disk_positions))
+
+    reset = reset_level
+
+
+# Name kept so existing references (and the plan's wording) still work
+ScreenManager = World
 
 class ActiveCheckpoint:
     """
     Active checkpoint class.
-    References currently active checkpoint.
+    References currently active checkpoint (world coordinates).
     Singleton by design.
     """
     def __init__(self):
@@ -521,17 +843,22 @@ class ActiveCheckpoint:
         self.screen = None
         self.position = None
 
-    def update(self, level, screen, position):
+    def update(self, level, position=None):
         self.level = level
-        self.screen = screen
-        self.position = copy.copy(position)  # copy to avoid reference issues
-        logging.info("Checkpoint updated: level=%d, screen=%d, pos=%s",
-                     level, screen, position)
+        self.screen = None
+        self.position = None
+        if isinstance(position, XY):
+            self.position = copy.copy(position)  # copy to avoid ref issues
+            self.screen = gl.room_of(position.x, position.y)
+        logging.info("Checkpoint updated: level=%s, pos=%s", level, position)
 
     def get_level(self):
         return self.level
 
     def get_screen(self):
+        """Room containing the checkpoint (kept for save-game compatibility)."""
+        if isinstance(self.position, XY):
+            return gl.room_of(self.position.x, self.position.y)
         return self.screen
 
     def get_position(self):
@@ -776,16 +1103,17 @@ class RocketUp(Entity):
         self.frame = (self.frame + 1) % len(self.sprites) if self.sprites else 0
 
         # Wall collision
-        screen = gl.screen_manager.get_screen()
-        if screen and self.check_collision(XY(0, -self.speed), screen):
+        if self.check_collision(XY(0, -self.speed)):
             from emhero import put_explosion
             put_explosion(self.position.x, self.position.y)
             snd.play_sound('blast')
             self.vanish()
             return
 
-        # Off-screen
-        if self.position.y < -gl.SPRITE_Y:
+        # Left the activity zone
+        world = gl.screen_manager
+        if world is not None and self.world_rect().bottom < \
+                world.activity_rect().top:
             self.vanish()
 
 
@@ -845,16 +1173,17 @@ class RocketDown(Entity):
         self.frame = (self.frame + 1) % len(self.sprites) if self.sprites else 0
 
         # Wall collision
-        screen = gl.screen_manager.get_screen()
-        if screen and self.check_collision(XY(0, self.speed), screen):
+        if self.check_collision(XY(0, self.speed)):
             from emhero import put_explosion
             put_explosion(self.position.x, self.position.y)
             snd.play_sound('blast')
             self.vanish()
             return
 
-        # Off-screen
-        if self.position.y > gl.SCREEN_Y * gl.SPRITE_Y:
+        # Left the activity zone
+        world = gl.screen_manager
+        if world is not None and self.world_rect().top > \
+                world.activity_rect().bottom:
             self.vanish()
 
 
@@ -874,12 +1203,20 @@ class KillingFloor(Entity):
             gl.killing_floor = True
 
             # Remove bottom row collisions (EB_ENEM.C:491)
-            screen = gl.screen_manager.get_screen()
-            if screen:
-                bottom_y = (gl.SCREEN_Y - 1) * gl.SPRITE_Y
-                # Filter out collision objects at the bottom row
-                screen.collisions = [c for c in screen.collisions
-                                     if c.get_y() < bottom_y]
+            world = gl.screen_manager
+            if world is not None:
+                pos = self.get_position()
+                room = gl.room_of(pos.x, pos.y)
+                screen = None
+                if 0 <= room < len(world.screens):
+                    screen = world.screens[room]
+                if screen:
+                    bottom_y = (gl.room_origin(room).y +
+                                (gl.SCREEN_Y - 1) * gl.SPRITE_Y)
+                    # Filter out collision objects at the bottom row
+                    screen.collisions = [c for c in screen.collisions
+                                         if c.get_y() < bottom_y]
+                    world.rebuild_colliders()
             logging.debug("KillingFloor activated - bottom collisions removed")
             self.vanish()
 
@@ -975,22 +1312,14 @@ def sync_checkpoint_entities():
     """
     if gl.checkpoint is None or gl.screen_manager is None:
         return
-    screens = gl.screen_manager.get_screens()
-    screen_number = gl.checkpoint.get_screen()
     position = gl.checkpoint.get_position()
-    if not screens or screen_number is None or position is None:
+    if position is None:
         return
-    if not 0 <= screen_number < len(screens):
-        return
-    screen = screens[screen_number]
-    if not screen:
-        return
-    for item in screen.active:
+    for item in gl.screen_manager.entities:
         if isinstance(item, Checkpoint) and item.get_position() == position:
             item.activate()
             gl.checkpoint_entity = item
-            logging.info("Checkpoint sprite synced: screen=%d pos=%s",
-                         screen_number, position)
+            logging.info("Checkpoint sprite synced: pos=%s", position)
             return
 
 
@@ -1020,8 +1349,9 @@ class Exit(Entity):
             indicator_pos = XY(pos.x, pos.y - gl.SPRITE_Y)
             self.indicator_entity = ExitIndicator([self.indicator_sprite], indicator_pos)
             # Add to active entities so it can be touched
-            gl.screen.active.append(self.indicator_entity)
-            self.indicator_entity.set_origin(gl.screen)
+            world = gl.screen_manager
+            if world is not None:
+                world.spawn(self.indicator_entity)
 
 
 class ExitIndicator(Entity):
@@ -1171,17 +1501,23 @@ class EnemyPlatform(Entity):
     def initialize_patrol(self):
         """Find platform boundaries - EB_ENEM.C:867-944"""
         pos = self.get_position()
-        screen = gl.screen_manager.get_screen()
+        room = gl.room_of(pos.x, pos.y)
+        origin = gl.room_origin(room)
+        # The scan never leaves the enemy's own room (C used the screen edge)
+        room_left = origin.x
+        room_right = origin.x + gl.MAX_X - gl.SPRITE_X
 
         # Scan right for boundary (platform edge or wall)
         # C uses 24px steps (one tile); in 2× space that is SPRITE_X (48px)
         x = pos.x
         for _ in range(12):  # Max 12 tiles (576 pixels)
+            if x + gl.SPRITE_X > room_right:
+                break
             # Check wall collision to right
-            if self.would_collide_at(XY(x + gl.SPRITE_X, pos.y), XY(1, 0), screen):
+            if self.would_collide_at(XY(x + gl.SPRITE_X, pos.y), XY(1, 0)):
                 break
             # Check if ground continues
-            if not self.has_ground_at(x + gl.SPRITE_X, pos.y, screen):
+            if not self.has_ground_at(x + gl.SPRITE_X, pos.y):
                 break
             x += gl.SPRITE_X
         self.right_boundary = x
@@ -1189,9 +1525,11 @@ class EnemyPlatform(Entity):
         # Scan left for boundary
         x = pos.x
         for _ in range(12):
-            if self.would_collide_at(XY(x - gl.SPRITE_X, pos.y), XY(-1, 0), screen):
+            if x - gl.SPRITE_X < room_left:
                 break
-            if not self.has_ground_at(x - gl.SPRITE_X, pos.y, screen):
+            if self.would_collide_at(XY(x - gl.SPRITE_X, pos.y), XY(-1, 0)):
+                break
+            if not self.has_ground_at(x - gl.SPRITE_X, pos.y):
                 break
             x -= gl.SPRITE_X
         self.left_boundary = x
@@ -1223,30 +1561,32 @@ class EnemyPlatform(Entity):
         logging.debug("EnemyPlatform initialized: pos=%s, bounds=[%d, %d]",
                      pos, self.left_boundary, self.right_boundary)
 
-    def would_collide_at(self, pos, direction, screen):
+    def would_collide_at(self, pos, direction, screen=None):
         """Check if there's a wall collision at position in direction"""
-        if not screen:
+        world = gl.screen_manager
+        if world is None:
             return False
         me = self.get_bbox().copy()
         me.move_ip(pos)
-        for obj in screen.collisions:
-            you = obj.get_bbox().copy()
-            you.move_ip(obj.get_position())
-            if me.colliderect(you):
-                sides = obj.get_sides()
-                if direction.x > 0 and sides["L"]:
-                    return True
-                elif direction.x < 0 and sides["R"]:
-                    return True
+        for obj in world.colliders_in_rect(me):
+            if obj is self:
+                continue
+            sides = obj.get_sides()
+            if direction.x > 0 and sides["L"]:
+                return True
+            elif direction.x < 0 and sides["R"]:
+                return True
         return False
 
-    def has_ground_at(self, x, y, screen):
+    def has_ground_at(self, x, y, screen=None):
         """Check if there's ground below a position"""
-        if not screen:
+        world = gl.screen_manager
+        if world is None:
             return False
         # Check for collision block below
         check_y = y + gl.SPRITE_Y
-        for obj in screen.collisions:
+        me = pygame.Rect(x, check_y, 2, gl.SPRITE_Y)
+        for obj in world.colliders_in_rect(me):
             obj_pos = obj.get_position()
             obj_bbox = obj.get_bbox()
             obj_top = obj_pos.y + obj_bbox.y
@@ -1435,18 +1775,21 @@ class EnemyFlying(Entity):
     def initialize_patrol(self):
         """Find patrol boundaries - EB_ENEM.C:867-944 (no ground check for flying)"""
         pos = self.get_position()
-        screen = gl.screen_manager.get_screen()
+        room = gl.room_of(pos.x, pos.y)
+        origin = gl.room_origin(room)
+        # The scan never leaves the enemy's own room (C clamped at the
+        # screen edge, EB_ENEM.C:1039-1068).
+        room_left = origin.x
+        room_right = origin.x + gl.MAX_X - gl.SPRITE_X
 
         # Scan right for boundary (wall only - no ground check for flying).
-        # C probes up to ~300px (2x = 600) and clamps at the screen edge
-        # (EB_ENEM.C:1039-1068). Use full-tile (SPRITE_X) steps like the
-        # platform scan; stop at a wall or the screen edge.
-        max_x = gl.SCREEN_X * gl.SPRITE_X
+        # C probes up to ~300px (2x = 600) and clamps at the screen edge.
+        # Use full-tile (SPRITE_X) steps like the platform scan.
         x = pos.x
         for _ in range(gl.SCREEN_X):
-            if x + gl.SPRITE_X > max_x:
+            if x + gl.SPRITE_X > room_right:
                 break
-            if self.would_collide_at(XY(x + gl.SPRITE_X, pos.y), XY(1, 0), screen):
+            if self.would_collide_at(XY(x + gl.SPRITE_X, pos.y), XY(1, 0)):
                 break
             x += gl.SPRITE_X
         self.right_boundary = x
@@ -1454,9 +1797,9 @@ class EnemyFlying(Entity):
         # Scan left for boundary
         x = pos.x
         for _ in range(gl.SCREEN_X):
-            if x - gl.SPRITE_X < 0:
+            if x - gl.SPRITE_X < room_left:
                 break
-            if self.would_collide_at(XY(x - gl.SPRITE_X, pos.y), XY(-1, 0), screen):
+            if self.would_collide_at(XY(x - gl.SPRITE_X, pos.y), XY(-1, 0)):
                 break
             x -= gl.SPRITE_X
         self.left_boundary = x
@@ -1488,21 +1831,21 @@ class EnemyFlying(Entity):
         logging.debug("EnemyFlying initialized: pos=%s, bounds=[%d, %d]",
                      pos, self.left_boundary, self.right_boundary)
 
-    def would_collide_at(self, pos, direction, screen):
+    def would_collide_at(self, pos, direction, screen=None):
         """Check if there's a wall collision at position in direction"""
-        if not screen:
+        world = gl.screen_manager
+        if world is None:
             return False
         me = self.get_bbox().copy()
         me.move_ip(pos)
-        for obj in screen.collisions:
-            you = obj.get_bbox().copy()
-            you.move_ip(obj.get_position())
-            if me.colliderect(you):
-                sides = obj.get_sides()
-                if direction.x > 0 and sides["L"]:
-                    return True
-                elif direction.x < 0 and sides["R"]:
-                    return True
+        for obj in world.colliders_in_rect(me):
+            if obj is self:
+                continue
+            sides = obj.get_sides()
+            if direction.x > 0 and sides["L"]:
+                return True
+            elif direction.x < 0 and sides["R"]:
+                return True
         return False
 
     def update_patrol(self):
@@ -1661,49 +2004,51 @@ class EnemyProjectile(Entity):
         if self.sprites:
             self.frame = (self.frame + 1) % len(self.sprites)
 
-        # Off-screen check
-        if (self.position.x < -gl.SPRITE_X or
-            self.position.x > gl.SCREEN_X * gl.SPRITE_X or
-            self.position.y < -gl.SPRITE_Y or
-            self.position.y > gl.SCREEN_Y * gl.SPRITE_Y):
-            self.vanish()
-            return
+        # Activity-zone check: the projectile dies only when it has left the
+        # viewport inflated by half a viewport (it may fly off-screen).
+        world = gl.screen_manager
+        if world is not None:
+            activity = world.activity_rect()
+            rect = self.world_rect()
+            if (rect.right < activity.left or rect.left > activity.right or
+                    rect.bottom < activity.top or rect.top > activity.bottom):
+                self.vanish()
+                return
 
         # Wall collision check - only stop on SOLID walls (EB_ENEM.C:581-642)
         # Original uses cave_test which checks tile solidity, not object overlap
         # Only collide with objects that have ALL collision sides (solid blocks)
-        screen = gl.screen_manager.get_screen()
-        if screen and self.check_solid_wall_collision(screen):
+        if self.check_solid_wall_collision():
             self.vanish()
 
-    def check_solid_wall_collision(self, screen):
+    def check_solid_wall_collision(self, screen=None):
         """
         Check collision with solid walls only (not decorative sprites).
         Matches original cave_test behavior - only solid blocks stop projectiles.
         """
-        if not screen:
+        world = gl.screen_manager
+        if world is None:
             return False
 
         me = self.get_bbox().copy()
         me.move_ip(self.get_position())
 
-        for obj in screen.collisions:
-            you = obj.get_bbox().copy()
-            you.move_ip(obj.get_position())
-            if me.colliderect(you):
-                sides = obj.get_sides()
-                # Only stop on objects that block from the direction we're moving
-                # AND are actual solid walls (have multiple collision sides)
-                num_sides = sum([sides["L"], sides["R"], sides["T"], sides["B"]])
-                if num_sides >= 2:  # Solid walls typically have 2+ collision sides
-                    if self.velocity.x > 0 and sides["L"]:
-                        return True
-                    elif self.velocity.x < 0 and sides["R"]:
-                        return True
-                    elif self.velocity.y > 0 and sides["T"]:
-                        return True
-                    elif self.velocity.y < 0 and sides["B"]:
-                        return True
+        for obj in world.colliders_in_rect(me):
+            if obj is self:
+                continue
+            sides = obj.get_sides()
+            # Only stop on objects that block from the direction we're moving
+            # AND are actual solid walls (have multiple collision sides)
+            num_sides = sum([sides["L"], sides["R"], sides["T"], sides["B"]])
+            if num_sides >= 2:  # Solid walls typically have 2+ collision sides
+                if self.velocity.x > 0 and sides["L"]:
+                    return True
+                elif self.velocity.x < 0 and sides["R"]:
+                    return True
+                elif self.velocity.y > 0 and sides["T"]:
+                    return True
+                elif self.velocity.y < 0 and sides["B"]:
+                    return True
         return False
 
     def get_bbox(self):
@@ -1769,7 +2114,9 @@ class Explosion(Entity):
         self.frame += 1
         if self.frame >= len(self.sprites):
             # Animation complete - remove explosion
-            gl.screen.active.remove(self)
+            world = gl.screen_manager
+            if world is not None:
+                world.remove(self)
 
     def name(self):
         return "Explosion"
@@ -1819,22 +2166,18 @@ class ExplosionWithBroke(Entity):
         self.frame += 1
 
         # When explosion completes, spawn the broken sprite entity (EB_ENEM.I:3472-3481)
+        world = gl.screen_manager
         if self.frame >= len(self.sprites):
             if not self.broken_sprite_spawned and self.broken_entity:
-                # Add broken sprite to current screen
-                if gl.screen:
-                    gl.screen.active.append(self.broken_entity)
-                    logging.debug("ExplosionWithBroke: Added BrokenSprite to current screen at %s",
-                                 self.broken_entity.position)
-                # ALSO add to level data so it persists across screen changes
-                screen_num = gl.screen_manager.get_screen_number()
-                gl.screen_manager.add_to_level_data(screen_num, self.broken_entity)
+                # Add the broken sprite to both the world and the level data
+                if world is not None:
+                    world.spawn(self.broken_entity)
+                    logging.debug("ExplosionWithBroke: Added BrokenSprite at %s",
+                                  self.broken_entity.position)
                 self.broken_sprite_spawned = True
-            # Remove explosion from current screen (not from level data - it was never there)
-            try:
-                gl.screen.active.remove(self)
-            except ValueError:
-                logging.debug("ExplosionWithBroke: Already removed from screen")
+            # Remove the finished explosion (it was never part of the level data)
+            if world is not None:
+                world.remove(self)
 
     def name(self):
         return "ExplosionWithBroke"

@@ -19,14 +19,20 @@ class Gameplay:
     Main gameplay functionality class.
     Singleton by design.
     """
+    # Entity classes removed once they leave the activity zone
+    CLEANUP_TYPES = ()
+
     def __init__(self):
         gl.data_folder = "data"
         gl.level = da.Level()
         self.controller = ga.Controller()
         # initialize a few global objects
         # thus loading associated sprite sets
-        gl.screen_manager = ga.ScreenManager()
+        gl.camera = gl.Camera()
+        gl.screen_manager = ga.World()
         gl.player = pl.PlayerEntity(self.controller)
+        self.CLEANUP_TYPES = (ga.EnemyProjectile, pl.Projectile,
+                              ga.Explosion, ga.ExplosionWithBroke)
         gl.enemies = ot.Enemies()
         gl.weapons = ot.Weapons()
         gl.info = ot.Info()
@@ -59,11 +65,12 @@ class Gameplay:
                              pygame.K_r: self.on_k_r,
                              pygame.K_F5: self.on_k_f5,
                              pygame.K_F7: self.on_k_f7,
+                             pygame.K_F8: self.on_k_f8,
                              pygame.K_F9: self.on_k_f9}
         # Debug shortcuts: handled only when the game runs with --debug
         self.debug_keys = frozenset({
             pygame.K_LEFT, pygame.K_RIGHT, pygame.K_UP, pygame.K_DOWN,
-            pygame.K_TAB,
+            pygame.K_TAB, pygame.K_F8,
             pygame.K_0, pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
             pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8, pygame.K_9,
             pygame.K_d, pygame.K_f})
@@ -97,7 +104,8 @@ class Gameplay:
 
     def show_map(self, pos):
         """Display level map (for debug only)"""
-        scr = gl.screen_manager.get_screen_number()
+        player_pos = gl.player.get_position() if gl.player else XY(0, 0)
+        scr = gl.room_of(player_pos.x, player_pos.y)
         CURRENT = 0xFFFFFF
         # pylint: disable-msg=E1121
         screens_map_copy = pygame.Surface((32, 32))
@@ -119,21 +127,36 @@ class Gameplay:
         """Display status line"""
         di.status_line.show()
 
-    def display_screen(self, screen):
-        """Display all objects (active and background) on the screen"""
-        gl.screen_manager.update_active() # make sure newly created objects get displayed
-        if screen:
-            for entity in screen.background:
+    def display_screen(self, screen=None):
+        """
+        Display the visible part of the seamless world.
+
+        ``screen`` is accepted for compatibility and ignored: rooms are
+        picked from the camera viewport instead.
+        """
+        world = gl.screen_manager
+        world.update_active()  # make sure newly created objects get displayed
+        if gl.camera is not None:
+            view = gl.camera.viewport()
+        else:
+            view = pygame.Rect(0, 0, gl.MAX_X, gl.MAX_Y)
+        # Two tiles of margin so objects on a seam never "pop"
+        margin = gl.SPRITE_X * 2
+        drawn = view.inflate(margin * 2, margin * 2)
+        rooms = world.visible_rooms(drawn)
+        for room in rooms:
+            for entity in room.background:
                 entity.display()
-            for entity in screen.collisions:
+        for room in rooms:
+            for entity in room.collisions:
                 entity.display()
                 if gl.show_collisions:
                     entity.display_collisions()
-            self.deferred = []
-            for entity in screen.active:
-                deferred = entity.display()
-                if deferred:
-                    self.deferred.append(deferred)
+        self.deferred = []
+        for entity in world.entities_in_rect(drawn):
+            deferred = entity.display()
+            if deferred:
+                self.deferred.append(deferred)
 
     def display_deferred(self):
         for deferred in self.deferred:
@@ -151,44 +174,55 @@ class Gameplay:
         position = gl.player.get_position() + offset
         gl.player.set_position(position)
 
+    def teleport_to_room_offset(self, offset):
+        """Debug: teleport the hero into a neighbouring room."""
+        world = gl.screen_manager
+        pos = gl.player.get_position()
+        room = (gl.room_of(pos.x, pos.y) + offset) % gl.ROOMS_TOTAL
+        if not world.screens or not world.screens[room]:
+            di.info_lines.add("No room %d" % room)
+            return
+        target = gl.room_origin(room) + XY(gl.MAX_X // 2,
+                                           gl.MAX_Y - gl.SPRITE_Y * 2)
+        gl.player.stand(target)
+        gl.player.to_ground = gl.player.check_ground()
+        gl.player.switch_state(gl.player.state_stand)
+        world.snap_camera()
+        di.info_lines.add("Room %d" % room)
+
     def on_k_left(self):
-        cs = gl.screen_manager.get_screen_number()
         if pygame.key.get_mods() & pygame.KMOD_CTRL:
-            cs -= 1 if cs > 0 else -255
-            gl.screen_manager.change_screen(cs)
+            self.teleport_to_room_offset(-1)
         elif pygame.key.get_mods() & pygame.KMOD_SHIFT:
-            if gl.player.get_x() >= 0:
-                self.move_player((-gl.SPRITE_X, 0))
+            self.move_player((-gl.SPRITE_X, 0))
 
     def on_k_right(self):
-        cs = gl.screen_manager.get_screen_number()
         if pygame.key.get_mods() & pygame.KMOD_CTRL:
-            cs += 1 if cs < 255 else -255
-            gl.screen_manager.change_screen(cs)
+            self.teleport_to_room_offset(1)
         elif pygame.key.get_mods() & pygame.KMOD_SHIFT:
-            if gl.player.get_x() <= gl.MAX_X:
-                self.move_player((gl.SPRITE_X, 0))
+            self.move_player((gl.SPRITE_X, 0))
 
     def on_k_up(self):
-        cs = gl.screen_manager.get_screen_number()
         if pygame.key.get_mods() & pygame.KMOD_CTRL:
-            cs -= 16 if cs > 15 else -240
-            gl.screen_manager.change_screen(cs)
+            self.teleport_to_room_offset(-gl.ROOMS_X)
         elif pygame.key.get_mods() & pygame.KMOD_SHIFT:
-            if gl.player.get_y() >= -2 * gl.SPRITE_Y:
-                self.move_player((0, -gl.SPRITE_Y))
+            self.move_player((0, -gl.SPRITE_Y))
 
     def on_k_down(self):
-        cs = gl.screen_manager.get_screen_number()
         if pygame.key.get_mods() & pygame.KMOD_CTRL:
-            cs += 16 if cs < 240 else -240
-            gl.screen_manager.change_screen(cs)
+            self.teleport_to_room_offset(gl.ROOMS_X)
         elif pygame.key.get_mods() & pygame.KMOD_SHIFT:
-            if gl.player.get_y() <= ((gl.SCREEN_Y + 2) * gl.SPRITE_Y):
-                self.move_player((0, gl.SPRITE_Y))
+            self.move_player((0, gl.SPRITE_Y))
 
     def on_k_tab(self):
         gl.show_collisions = False if gl.show_collisions else True
+
+    def on_k_f8(self):
+        """Toggle the scrolling camera (debug: off = page-like picture)."""
+        if gl.camera is not None:
+            gl.camera.enabled = not gl.camera.enabled
+            di.info_lines.add("Camera: %s" % ("ON" if gl.camera.enabled
+                                             else "OFF"))
 
     def on_k_1(self):
         di.info_lines.add("level 1")
@@ -307,6 +341,8 @@ class Gameplay:
         import emquicksave as qs
         if qs.load_quick():
             self.screens_map = self.init_map
+            if gl.screen_manager is not None:
+                gl.screen_manager.snap_camera()
             di.info_lines.add("Quick load: %s" % qs.QUICK_SAVE_FILE)
         else:
             di.info_lines.add("Quick load failed")
@@ -319,9 +355,8 @@ class Gameplay:
         # sprite with param = 1, EB.C level data) when the active checkpoint
         # belongs to another level - see Level.process() in emdata.py.
         gl.level.load(gl.level_names[gl.current_level])
-        gl.screen_manager.add_screens(gl.level.get_screens())
+        gl.screen_manager.load_level(gl.level)
         self.screens_map = self.init_map
-        start_screen = gl.checkpoint.get_screen()
         start_position = gl.checkpoint.get_position()
         gl.disks = 0 # no disks collected after level load (EB.C:1461)
         gl.disk_positions = [] # clear collected disk positions (EB.C:1462-1464)
@@ -332,15 +367,15 @@ class Gameplay:
         gl.player.temp = 0
         if start_position:
             start_position += XY(gl.SPRITE_X // 2, gl.SPRITE_Y)
-            gl.screen_manager.change_screen(start_screen)
-            gl.screen = gl.screen_manager.get_screen()
             gl.player.stand(start_position)
+            # Snap the camera: level entry never scrolls in
+            gl.screen_manager.snap_camera()
             # Enter the level exactly like respawn() after death: a clean
             # standing state with the distance to the ground recalculated
             gl.player.death_timer = 0
             gl.player.invuln_timer = 0
             gl.player.touched = []
-            gl.player.to_ground = gl.player.check_ground(gl.screen)
+            gl.player.to_ground = gl.player.check_ground()
             gl.player.switch_state(gl.player.state_stand)
             # Level-entry sample (hero_enter_level_proc EB_HERO.C:681)
             import emsound as snd
@@ -354,16 +389,16 @@ class Gameplay:
         a full fresh reload - start position, disks, weapon all reset.
         """
         # level number -1 forces the level entrance to become the checkpoint
-        gl.checkpoint.update(-1, 0, XY(0, 0))
+        gl.checkpoint.update(-1, None)
         mn.show_loading_animation()
         self.load_level()
-        gl.screen = gl.screen_manager.get_screen()
         # The player may be mid-jump or mid-death when restarting;
         # return to a clean standing state (same pattern as respawn()).
         gl.player.death_timer = 0
         gl.player.touched = []
-        gl.player.to_ground = gl.player.check_ground(gl.screen)
+        gl.player.to_ground = gl.player.check_ground()
         gl.player.switch_state(gl.player.state_stand)
+        gl.screen_manager.snap_camera()
         di.info_lines.add("Level restarted")
 
     def loop_begin(self):
@@ -394,15 +429,41 @@ class Gameplay:
             # gamepad START quits the level, same as Esc (with confirmation)
             self.on_k_escape()
 
+    def cleanup_inactive(self, activity):
+        """
+        Remove projectiles and effects that left the activity zone.
+
+        They are not updated anymore (they are outside the activity rect),
+        so without this sweep they would hang in the world forever.
+        """
+        world = gl.screen_manager
+        search = activity.inflate(gl.MAX_X, gl.MAX_Y)
+        for entity in world.entities_in_rect(search):
+            if not isinstance(entity, self.CLEANUP_TYPES):
+                continue
+            if not entity.world_rect().colliderect(activity):
+                logging.debug("cleanup: %s left the activity zone",
+                              entity.name())
+                world.remove(entity)
+
     def loop_run(self):
-        gl.screen = gl.screen_manager.get_screen()
-        if gl.screen:
-            for active in gl.screen.active:
-                active.update()
+        world = gl.screen_manager
+        # objects spawned last frame become live now
+        world.update_active()
+        activity = world.activity_rect()
+        # Only entities inside the activity zone are updated
+        for entity in world.entities_in_rect(activity):
+            entity.update()
+        # the hero is always updated
         gl.player.update()
+        # pick up objects spawned during this frame's updates
+        world.update_active()
+        self.cleanup_inactive(activity)
+        # the camera follows the hero (and updates the current room)
+        world.update_camera()
 
     def loop_end(self):
-        self.display_screen(gl.screen)
+        self.display_screen()
         self.display_hero()
         self.display_deferred()
         self.display_indicators()
@@ -429,7 +490,7 @@ class Gameplay:
         load_quick() has already reinstated the level, the screen and the
         player, so only the per-session helpers are refreshed here.
         """
-        gl.screen = gl.screen_manager.get_screen()
+        gl.screen_manager.snap_camera()
         self.screens_map = self.init_map
         gl.exit_level_flag = False
         gl.killing_floor = False
@@ -459,7 +520,7 @@ class Gameplay:
                         gl.current_level = gl.next_level_code
                         # level -1 forces the new level's own entrance
                         # checkpoint to be adopted on load (like a new game)
-                        gl.checkpoint.update(-1, 0, XY(0, 0))
+                        gl.checkpoint.update(-1, None)
                         mn.show_loading_animation()
                         self.load_level()
                         di.info_lines.add("Level %d: %s" % (gl.current_level + 1, gl.level_names[gl.current_level]))
@@ -512,7 +573,7 @@ class Gameplay:
         # (same rule restart_level() uses).
         gl.disabled_checkpoints.clear()
         gl.checkpoint_entity = None
-        gl.checkpoint.update(-1, 0, XY(0, 0))
+        gl.checkpoint.update(-1, None)
         # Reset player state
         if gl.player:
             gl.player.power = 0

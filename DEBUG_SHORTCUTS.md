@@ -69,16 +69,20 @@ returns to the main menu.
 | 8 | Jump to Level 8 (widok) |
 | 9 | Jump to Test Level (weapon testing arena) |
 
-## Screen Navigation
+## Room Navigation
 
 | Key | Action |
 |-----|--------|
-| Ctrl+Left | Navigate to previous screen (horizontal) |
-| Ctrl+Right | Navigate to next screen (horizontal) |
-| Ctrl+Up | Navigate to screen above (vertical, -16) |
-| Ctrl+Down | Navigate to screen below (vertical, +16) |
+| Ctrl+Left | Teleport the hero into the room on the left |
+| Ctrl+Right | Teleport the hero into the room on the right |
+| Ctrl+Up | Teleport the hero into the room above |
+| Ctrl+Down | Teleport the hero into the room below |
 
-Note: The level is arranged in a 16x16 grid of 256 screens.
+Notes:
+- The level is a single seamless space arranged in a 16x16 grid of rooms
+  (256 slots); positions of all objects are world pixel coordinates.
+- These shortcuts move the hero himself (the camera follows him), so an
+  empty room slot simply answers "No room <n>".
 
 ## Player Teleport
 
@@ -111,14 +115,17 @@ Note: The level is arranged in a 16x16 grid of 256 screens.
 the "save game (y or n)" prompt, and the main menu entry **CONTINUE**
 restores it (it is greyed out when no quick save exists).
 
-The save file is JSON. It stores all JSON-serializable variables from
-`emglobals` plus player, checkpoint and current screen snapshots.
+The save file is JSON (`version: 2`). It stores all JSON-serializable
+variables from `emglobals` plus player, checkpoint and per-room entity
+snapshots in **world coordinates** (camera plan, stage 6). Version 1 files
+(room-local positions) are converted on load.
 
 ## Visual Debug
 
 | Key | Action |
 |-----|--------|
 | Tab | Toggle collision box display (shows AABBs and collision sides) |
+| F8 | Toggle the scrolling camera (off = camera pinned to the hero's room) |
 
 ## Gameplay Testing
 
@@ -160,8 +167,9 @@ The test level (key 9) is a dedicated weapon testing arena:
 
 ## Notes
 
-- All shortcuts described on this page (level jumps, screen navigation, teleports, weapon selection, collision display, death/disks cheats) require the `--debug` command line flag; without it the game only reacts to the player controls, Esc, R, F5, F7, F9 and Alt+X.
+- All shortcuts described on this page (level jumps, room navigation, teleports, weapon selection, collision display, camera toggle, death/disks cheats) require the `--debug` command line flag; without it the game only reacts to the player controls, Esc, R, F5, F7, F9 and Alt+X.
 - Most debug shortcuts require the Shift or Ctrl modifier to prevent accidental activation during normal gameplay.
 - Player controls (arrow keys and space) only work when no modifier keys (Ctrl, Shift, Alt) are held.
-- The minimap shows the current screen position as a white dot on the level grid.
-- Collision display (Tab) shows bounding boxes for all collidable entities.
+- The minimap shows the room containing the hero as a white dot on the level grid.
+- Collision display (Tab) shows bounding boxes for all collidable entities; it uses the same camera transform as the sprites, so it stays aligned while scrolling.
+- The level is seamless: there are no screen changes. Collisions, touching and the enemy AI all query the whole world; non-existing rooms act as walls ("void = wall").

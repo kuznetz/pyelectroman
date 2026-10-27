@@ -427,11 +427,95 @@ def _restore_checkpoint(snapshot):
     if gl.checkpoint is None or not snapshot:
         return
     level = snapshot.get("level")
-    screen = snapshot.get("screen")
     position = _decode(snapshot.get("position"))
-    if level is None or screen is None or not isinstance(position, XY):
+    if level is None or not isinstance(position, XY):
         return
-    gl.checkpoint.update(level, screen, position)
+    gl.checkpoint.update(level, position)
+
+
+def _shift_xy(value, origin):
+    """Return {XY_KEY: [x, y]} shifted by origin, or the value unchanged."""
+    if not isinstance(value, dict):
+        return value
+    coords = value.get(XY_KEY)
+    if not (isinstance(coords, (list, tuple)) and len(coords) == 2):
+        return value
+    return {XY_KEY: [int(coords[0]) + origin.x, int(coords[1]) + origin.y]}
+
+
+def _migrate_v1(payload):
+    """
+    Convert a version 1 quick save to version 2 (CAMERA_PLAN.md, stage 6).
+
+    Version 1 stored room-local positions (each entity was addressed by its
+    room number plus the pixel offset inside that room). Version 2 stores
+    world pixel coordinates, so every position is shifted by the origin of
+    the room it belonged to.
+    """
+    objects = payload.get("objects") or {}
+    globals_data = payload.get("globals") or {}
+
+    def room_origin(number):
+        try:
+            return gl.room_origin(int(number))
+        except (TypeError, ValueError):
+            return XY(0, 0)
+
+    # Per-room entity snapshots
+    entities = objects.get("entities")
+    if isinstance(entities, dict):
+        for key, entries in entities.items():
+            origin = room_origin(key)
+            for entry in entries or []:
+                if not isinstance(entry, dict):
+                    continue
+                home = entry.get("home")
+                if isinstance(home, (list, tuple)) and len(home) == 2:
+                    entry["home"] = [int(home[0]) + origin.x,
+                                     int(home[1]) + origin.y]
+                state = entry.get("state")
+                if isinstance(state, dict):
+                    state["position"] = _shift_xy(state.get("position"),
+                                                  origin)
+
+    current_room = (objects.get("screen_manager") or {}).get("current_screen",
+                                                              0)
+    player_origin = room_origin(current_room)
+    player = objects.get("player")
+    if isinstance(player, dict):
+        player["position"] = _shift_xy(player.get("position"), player_origin)
+        # legacy teleport target: [room, {x, y}]
+        target = player.get("teleport_target")
+        if isinstance(target, list) and len(target) == 2:
+            player["teleport_target"] = _shift_xy(
+                target[1], room_origin(target[0]))
+
+    checkpoint = objects.get("checkpoint")
+    if isinstance(checkpoint, dict):
+        checkpoint["position"] = _shift_xy(
+            checkpoint.get("position"), room_origin(checkpoint.get("screen", 0)))
+
+    # Collected disks: [room, {x, y}] -> {x, y} (world)
+    migrated_disks = []
+    for item in globals_data.get("disk_positions") or []:
+        if isinstance(item, (list, tuple)) and len(item) == 2:
+            migrated_disks.append(_shift_xy(item[1], room_origin(item[0])))
+    globals_data["disk_positions"] = migrated_disks
+
+    # Retired checkpoints: (level, room, x, y) -> (level, world x, world y)
+    migrated_marks = []
+    for item in globals_data.get("disabled_checkpoints") or []:
+        if not isinstance(item, (list, tuple)):
+            continue
+        if len(item) == 4:
+            origin = room_origin(item[1])
+            migrated_marks.append([item[0], int(item[2]) + origin.x,
+                                   int(item[3]) + origin.y])
+        else:
+            migrated_marks.append(list(item))
+    globals_data["disabled_checkpoints"] = migrated_marks
+
+    payload["version"] = 2
 
 
 def _ensure_level(level_index, rebuild=False):
@@ -455,7 +539,7 @@ def _ensure_level(level_index, rebuild=False):
     if (gl.level is None or loaded_name != level_name or
             not gl.screen_manager.get_screens()):
         gl.level.load(level_name)
-        gl.screen_manager.add_screens(gl.level.get_screens())
+        gl.screen_manager.load_level(gl.level)
     elif rebuild:
         gl.screen_manager.add_screens(gl.level.reset_screens())
 
@@ -466,7 +550,7 @@ def _restore_player(snapshot):
     if player is None:
         return
     if not snapshot:
-        player.screen = gl.screen
+        player.screen = gl.screen_manager.get_screen()
         return
 
     position = _decode(snapshot.get("position"))
@@ -478,10 +562,17 @@ def _restore_player(snapshot):
         player.move_vector = move_vector
 
     teleport_target = _decode(snapshot.get("teleport_target"))
-    if isinstance(teleport_target, list) and len(teleport_target) == 2:
-        teleport_target = (teleport_target[0], teleport_target[1])
-    if teleport_target is None or isinstance(teleport_target, tuple):
+    if isinstance(teleport_target, XY):
         player.teleport_target = teleport_target
+    elif isinstance(teleport_target, list) and len(teleport_target) == 2:
+        # legacy form: [room, XY] - convert to world coordinates
+        room, target = teleport_target
+        if isinstance(target, XY):
+            player.teleport_target = gl.room_origin(int(room)) + target
+        else:
+            player.teleport_target = None
+    else:
+        player.teleport_target = None
 
     for name in ("anim", "frame", "orientation", "to_ground", "jump",
                  "counter", "double_jump_used", "up_pressed", "prev_up",
@@ -494,7 +585,7 @@ def _restore_player(snapshot):
 
     # The player must already know its screen before the FSM state is
     # restored: some state init handlers query the ground/screen.
-    player.screen = gl.screen
+    player.screen = gl.screen_manager.get_screen()
     player.touched = []
 
     # Restore FSM state. Death state is not restored: continue standing.
@@ -526,12 +617,25 @@ def load_quick():
         logging.error("Quick load failed to read %s: %s", save_path, error)
         return False
 
+    # Version 1 saves keep room-local positions; convert them to world
+    # coordinates before anything is applied (CAMERA_PLAN.md, stage 6).
+    version = payload.get("version", 1)
+    if not isinstance(version, int) or version < 2:
+        _migrate_v1(payload)
+
     globals_data = payload.get("globals", {})
     objects = payload.get("objects", {})
 
     try:
         # 1. Plain globals (current_level, disks, flags, RNG state, ...)
         _restore_globals(globals_data)
+
+        # JSON turns tuples into lists: normalise the restored collections
+        gl.disabled_checkpoints = {
+            tuple(item) for item in (gl.disabled_checkpoints or [])
+            if isinstance(item, (list, tuple))}
+        gl.disk_positions = [pos for pos in (gl.disk_positions or [])
+                             if isinstance(pos, XY)]
 
         # 2. Checkpoint
         _restore_checkpoint(objects.get("checkpoint"))
@@ -545,28 +649,27 @@ def load_quick():
         if entities_data is not None:
             _restore_entities(entities_data)
 
-        screen_manager = objects.get("screen_manager") or {}
-        screen_number = screen_manager.get("current_screen", 0)
-        gl.screen_manager.change_screen(screen_number)
         # drop any entities queued in the old frame
         gl.screen_manager.new_objects = []
-        # checkpoint retirement state is session-local: reset it on load
-        gl.disabled_checkpoints = set()
         import emgame as ga
         ga.sync_checkpoint_entities()
 
-        # change_screen() reinitialises the screen randoms, restore saved ones
+        # restore the RNG state saved with the game
         for name in ("screen_randoms", "rand_seed"):
             if name in globals_data:
                 setattr(gl, name, _decode(globals_data[name]))
-        gl.screen = gl.screen_manager.get_screen()
 
         # 4. Player
         _restore_player(objects.get("player"))
+
+        # 5. Room and camera: the saved position defines the viewport
+        gl.screen_manager.update_current_room()
+        gl.screen_manager.snap_camera()
+        screen_number = gl.screen_manager.get_screen_number()
     except (AttributeError, TypeError, ValueError, IndexError) as error:
         logging.error("Quick load failed while applying state: %s", error)
         return False
 
-    logging.info("Quick load complete: level=%s, screen=%s",
+    logging.info("Quick load complete: level=%s, room=%s",
                  gl.current_level, screen_number)
     return True

@@ -386,7 +386,10 @@ class Level(LevelData):
         flags = sprite.flags
         action = sprite.action
         param = sprite.param
-        position = XY(x * gl.SPRITE_X, y * gl.SPRITE_Y)
+        # All objects live in world pixel coordinates: room origin plus the
+        # local sprite position inside the room (CAMERA_PLAN.md 2.1).
+        position = gl.room_origin(screen_number) + XY(x * gl.SPRITE_X,
+                                                      y * gl.SPRITE_Y)
         if (flags == 0x80) & (action == 0):
             entity = ga.Entity([sprite], position)
             entity.sprite_index = sidx  # Store for broken sprite lookup
@@ -405,14 +408,13 @@ class Level(LevelData):
             screen.active.append(entity)
             if isinstance(entity, ga.Checkpoint):
                 level_number = gl.level_names.index(self.name)
-                key = (level_number, screen_number, position.x, position.y)
+                key = (level_number, position.x, position.y)
                 if gl.checkpoint is None:
                     is_current = False
                     has_level_checkpoint = False
                 else:
                     is_current = (
                         gl.checkpoint.get_level() == level_number and
-                        gl.checkpoint.get_screen() == screen_number and
                         gl.checkpoint.get_position() == position)
                     has_level_checkpoint = (
                         gl.checkpoint.get_level() == level_number)
@@ -425,8 +427,7 @@ class Level(LevelData):
                     gl.checkpoint_entity = entity
                 elif param == 1 and not has_level_checkpoint:
                     # a fresh level: its entrance becomes the checkpoint
-                    gl.checkpoint.update(level_number, screen_number,
-                                         position)
+                    gl.checkpoint.update(level_number, position)
                     entity.activate()
                     gl.checkpoint_entity = entity
         else:

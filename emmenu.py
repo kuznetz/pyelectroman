@@ -251,16 +251,20 @@ class SaveGame:
                 logging.warning("Cannot save - no checkpoint set")
                 return False
 
-            # Build save data structure (matches original EB.C:920-948)
+            # Build save data structure (matches original EB.C:920-948).
+            # Positions are stored as (room, local x, local y) so the file
+            # stays compatible with the original screen-based format.
             position = checkpoint.get_position()
+            room = checkpoint.get_screen() or 0
             self.data = {
                 'level': checkpoint.get_level(),
-                'screen': checkpoint.get_screen(),
-                'position_x': position.x if position else 0,
-                'position_y': position.y if position else 0,
+                'screen': room,
+                'position_x': position.x % gl.MAX_X if position else 0,
+                'position_y': position.y % gl.MAX_Y if position else 0,
                 'disks': gl.disks,
                 'disk_positions': [
-                    [pos[0], pos[1].x, pos[1].y]
+                    [gl.room_of(pos.x, pos.y),
+                     pos.x % gl.MAX_X, pos.y % gl.MAX_Y]
                     for pos in gl.disk_positions
                 ] if gl.disk_positions else [],
                 'power': gl.player.power if gl.player else 0,
@@ -331,24 +335,26 @@ class SaveGame:
             # Set level
             gl.current_level = self.data.get('level', 0)
 
-            # Set checkpoint
+            # Set checkpoint (room + local offset -> world position)
             level = self.data.get('level', 0)
             screen = self.data.get('screen', 0)
             pos_x = self.data.get('position_x', 0)
             pos_y = self.data.get('position_y', 0)
-            gl.checkpoint.update(level, screen, XY(pos_x, pos_y))
+            position = gl.room_origin(screen) + XY(pos_x, pos_y)
+            gl.checkpoint.update(level, position)
             # the sprite reference will be re-resolved when the level loads
             gl.checkpoint_entity = None
 
             # Set disk count
             gl.disks = self.data.get('disks', 0)
 
-            # Restore disk positions
+            # Restore disk positions (room + local offset -> world position)
             gl.disk_positions = []
             for disk_data in self.data.get('disk_positions', []):
                 if len(disk_data) == 3:
                     screen_num, dx, dy = disk_data
-                    gl.disk_positions.append((screen_num, XY(dx, dy)))
+                    gl.disk_positions.append(
+                        gl.room_origin(screen_num) + XY(dx, dy))
 
             logging.info("Save data applied: level=%d, screen=%d, disks=%d",
                         gl.current_level, screen, gl.disks)

@@ -29,9 +29,13 @@ def init_display():
     # Render coefficient: physical pixels per logical (1280x960) pixel.
     # Based on the actual surface size (it may differ from the desktop one).
     # Every draw call multiplies its coordinates/sprites/fonts by it.
+    # Integer scale + letterbox keeps the scrolling camera pixel-perfect
+    # (a fractional scale would make the scene shimmer while scrolling,
+    # CAMERA_PLAN.md 4.5). Screens smaller than the logical size fall back
+    # to fractional downscaling so the game stays usable.
     screen_w, screen_h = screen.get_size()
-    gl.RENDER_SCALE = min(screen_w / LOGICAL_SIZE[0],
-                          screen_h / LOGICAL_SIZE[1])
+    fit = min(screen_w / LOGICAL_SIZE[0], screen_h / LOGICAL_SIZE[1])
+    gl.RENDER_SCALE = int(fit) if fit >= 1 else fit
     # Render target: the design window multiplied by the coefficient,
     # centered on the fullscreen surface (proportions preserved).
     screen.fill((0, 0, 0))
@@ -69,10 +73,24 @@ def clear_screen():
     gl.window.fill(pygame.Color(0, 0, 0))
 
 
+# Scaled sprite cache: id(surface) -> (surface, scaled surface).
+# Keyed also by RENDER_SCALE, so a resolution change invalidates the cache.
+_scaled_cache = {}
+_SCALED_CACHE_LIMIT = 4096
+
+
 def scale_sprite(image):
-    """Scale a 1x game sprite to the physical render size."""
-    return pygame.transform.scale(
-        image, gl.render_size(image.get_width(), image.get_height()))
+    """Scale a 1x game sprite to the physical render size (cached)."""
+    width, height = image.get_width(), image.get_height()
+    key = (id(image), width, height, gl.RENDER_SCALE)
+    cached = _scaled_cache.get(key)
+    if cached is not None and cached[0] is image:
+        return cached[1]
+    scaled = pygame.transform.scale(image, gl.render_size(width, height))
+    if len(_scaled_cache) >= _SCALED_CACHE_LIMIT:
+        _scaled_cache.clear()
+    _scaled_cache[key] = (image, scaled)
+    return scaled
 
 
 def present():
@@ -176,8 +194,9 @@ class DiskInfo:
             position = XY.from_self(self.position)
             scaled_disk = scale_sprite(self.disk)
             for d in range(self.disks):
+                # HUD is bound to the frame: no camera here
                 gl.display.blit(scaled_disk,
-                                gl.render_pos(position.x, position.y))
+                                gl.view_pos(position.x, position.y))
                 position.x += 22
 
 class LEDBar:
@@ -203,11 +222,12 @@ class LEDBar:
         position = XY.from_self(self.position)
         for led in range(6):
             scaled_led = scale_sprite(self.leds[self.mapping[self.value][led]])
+            # HUD is bound to the frame: no camera here
             gl.display.blit(scaled_led,
-                            gl.render_pos(position.x, position.y))
+                            gl.view_pos(position.x, position.y))
             position.x += 16
         scaled_led = scale_sprite(self.leds[4])
-        gl.display.blit(scaled_led, gl.render_pos(position.x, position.y))
+        gl.display.blit(scaled_led, gl.view_pos(position.x, position.y))
 
 class Indicators:
     def __init__(self):

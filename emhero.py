@@ -48,9 +48,10 @@ def put_explosion(x, y):
     # Create explosion entity at position
     explosion = ga.Explosion(explosion_sprites, XY(x, y))
 
-    # Add to current screen's active entities
-    if gl.screen:
-        gl.screen.active.append(explosion)
+    # Add to the world (spawned in world coordinates)
+    world = gl.screen_manager
+    if world is not None:
+        world.spawn(explosion)
 
     logging.debug("Explosion spawned at (%d, %d)", x, y)
 
@@ -175,13 +176,14 @@ class PlayerEntity(ga.FSM, ga.Entity):
                          self.anim, self.frame, self.state.__name__, e)
 
     def display_collisions(self, color=pygame.Color(255, 128, 255)):
-        """Display player's character bounding box."""
-        rect = self.get_bbox()
-        rect.move_ip(self.get_position())
-        s = 2.0 * gl.RENDER_SCALE
-        rect = pygame.Rect(int(round(rect.x * s)), int(round(rect.y * s)),
-                           max(1, int(round(rect.width * s))),
-                           max(1, int(round(rect.height * s))))
+        """Display player's character bounding box (camera aware)."""
+        bbox = self.get_bbox()
+        pos = self.get_position()
+        left = pos.x + bbox.left
+        top = pos.y + bbox.top
+        x1, y1 = gl.render_pos(left, top)
+        x2, y2 = gl.render_pos(left + bbox.width, top + bbox.height)
+        rect = pygame.Rect(x1, y1, max(1, x2 - x1), max(1, y2 - y1))
         pygame.draw.rect(gl.display, color, rect, 1)
 
     def get_bbox(self):
@@ -325,10 +327,16 @@ class PlayerEntity(ga.FSM, ga.Entity):
             self.apply_air_control()
 
         # Check killing floor death (EB_ENEM.C:486-492)
-        # When killing_floor is active, player dies if they fall below threshold
-        if gl.killing_floor and self.get_bottom() > (gl.SCREEN_Y - 1) * gl.SPRITE_Y:
-            logging.info("Player fell into killing floor")
-            return self.new_state(self.state_death)
+        # When killing_floor is active, player dies if they fall below the
+        # bottom row of the room they are in (world coordinates!)
+        if gl.killing_floor:
+            pos = self.get_position()
+            room = gl.room_of(pos.x, pos.y)
+            floor_y = (gl.room_origin(room).y +
+                       (gl.SCREEN_Y - 1) * gl.SPRITE_Y)
+            if self.get_bottom() > floor_y:
+                logging.info("Player fell into killing floor")
+                return self.new_state(self.state_death)
 
         if self.to_ground == 0:
             return self.switch_state(self.state_land)
@@ -461,9 +469,13 @@ class PlayerEntity(ga.FSM, ga.Entity):
         before returning control (matches hero_teleport_wait_proc EB_HERO.C:841-871).
         """
         if self.teleport_target:
-            if self.teleport_target[0] != gl.screen_manager.get_screen_number():
-                gl.screen_manager.change_screen(self.teleport_target[0])
-            self.set_position(self.teleport_target[1] + XY(0, -gl.SPRITE_Y * 2))
+            target = self.teleport_target
+            if isinstance(target, (tuple, list)):
+                target = target[-1]
+            if isinstance(target, XY):
+                self.set_position(target + XY(0, -gl.SPRITE_Y * 2))
+                if gl.screen_manager is not None:
+                    gl.screen_manager.snap_camera()
         if init:
             # NOTE: C does not play any sound in hero_teleport_in_proc.
             # The 'area' sample is only triggered on level entry / respawn
@@ -524,28 +536,42 @@ class PlayerEntity(ga.FSM, ga.Entity):
     def find_teleport_target(self, start_pos):
         """
         Find a suitable teleport target.
-        The first one above the current one on the same X position qualifies.
-        If not present on current level, check all levels above wrapping around
-        map boundary and continuing from the bottom.
+
+        The first teleport above the current one on the same world X wins.
+        If the current room has none, the search continues with the rooms
+        above (wrapping around the map) until something is found.
         """
-        sp = copy.copy(start_pos)
         self.teleport_target = None
-        sn = gl.screen_manager.get_screen_number()
-        while not self.teleport_target:
-            tp = {}
-            screen = gl.screen_manager.inspect_screen(sn)
-            if screen:
-                for obj in screen.active:
-                    if isinstance(obj, ga.Teleport):
-                        if obj.get_position().x == sp.x:
-                            tp[obj.get_position().y] = obj
-            if tp:
-                for y in range(sp.y, 0, -gl.SPRITE_Y):
-                    if y in tp:
-                        self.teleport_target = (sn, XY(sp.x, y))
-                        break
-            sp.y = (gl.SCREEN_Y + 1) * gl.SPRITE_Y
-            sn = (sn - 16) % 256
+        world = gl.screen_manager
+        if world is None:
+            return
+        room = gl.room_of(start_pos.x, start_pos.y)
+        gx = room % gl.ROOMS_X
+        gy = room // gl.ROOMS_X
+        for offset in range(gl.ROOMS_Y):
+            sy = (gy - offset) % gl.ROOMS_Y
+            if not world.room_exists(gx, sy):
+                continue
+            index = sy * gl.ROOMS_X + gx
+            screen = world.inspect_screen(index)
+            if not screen:
+                continue
+            if offset == 0:
+                limit = start_pos.y
+            else:
+                limit = gl.room_origin(index).y + gl.MAX_Y
+            found = None
+            for obj in screen.active:
+                if not isinstance(obj, ga.Teleport):
+                    continue
+                obj_pos = obj.get_position()
+                if obj_pos.x != start_pos.x or obj_pos.y >= limit:
+                    continue
+                if found is None or obj_pos.y > found.y:
+                    found = obj_pos.copy()
+            if found is not None:
+                self.teleport_target = found
+                return
 
     def max_ammo(self, power):
         """Magazine capacity for a weapon level (x3 in casual mode)."""
@@ -577,10 +603,8 @@ class PlayerEntity(ga.FSM, ga.Entity):
         """
         if getattr(obj, "spent", False):
             return False
-        current_screen = gl.screen_manager.get_screen_number()
         current_pos = obj.get_position()
-        is_current = (gl.checkpoint.get_screen() == current_screen and
-                      gl.checkpoint.get_position() == current_pos)
+        is_current = gl.checkpoint.get_position() == current_pos
         if is_current:
             return False
 
@@ -588,26 +612,22 @@ class PlayerEntity(ga.FSM, ga.Entity):
         prev_pos = gl.checkpoint.get_position()
         if prev_pos is not None:
             prev_level = gl.checkpoint.get_level()
-            prev_screen = gl.checkpoint.get_screen()
             gl.disabled_checkpoints.add(
-                (prev_level, prev_screen, prev_pos.x, prev_pos.y))
+                (prev_level, prev_pos.x, prev_pos.y))
             prev_entity = gl.checkpoint_entity
             if (prev_entity is not None and
                     prev_entity.get_position() == prev_pos):
                 prev_entity.deactivate()
-            else:
-                # stale reference: find the sprite by its screen and position
-                screens = gl.screen_manager.get_screens()
-                if screens and isinstance(prev_screen, int):
-                    old_screen = screens[prev_screen]
-                    if old_screen:
-                        for item in old_screen.active:
-                            if (isinstance(item, ga.Checkpoint) and
-                                    item.get_position() == prev_pos):
-                                item.deactivate()
+            elif gl.screen_manager is not None:
+                # stale reference: find the sprite by its world position
+                for item in gl.screen_manager.entities:
+                    if (isinstance(item, ga.Checkpoint) and
+                            item.get_position() == prev_pos):
+                        item.deactivate()
+                        break
 
         # the touched checkpoint becomes the current respawn point
-        gl.checkpoint.update(gl.current_level, current_screen, current_pos)
+        gl.checkpoint.update(gl.current_level, current_pos)
         obj.activate()
         gl.checkpoint_entity = obj
 
@@ -615,8 +635,7 @@ class PlayerEntity(ga.FSM, ga.Entity):
         self.power = 0
         self.temp = 0
         self.select_weapon(0)
-        logging.info("Checkpoint activated: screen=%d pos=%s",
-                     current_screen, current_pos)
+        logging.info("Checkpoint activated: pos=%s", current_pos)
         return True
 
     def take_hit(self, play_sound=True):
@@ -747,8 +766,7 @@ class PlayerEntity(ga.FSM, ga.Entity):
                     gl.disks += 1
                     # Track disk position for level reset (EB.C:1391-1395)
                     # disk_x[disk_num], disk_y[disk_num], disk_c[disk_num]
-                    screen_num = gl.screen_manager.get_screen_number()
-                    gl.disk_positions.append((screen_num, obj.position.copy()))
+                    gl.disk_positions.append(obj.position.copy())
                     obj.vanish()  # remove floppy from the map
                     di.info_lines.add("Disk collected (%d/3)" % gl.disks)
                     snd.play_sound('disk')
@@ -802,7 +820,9 @@ class PlayerEntity(ga.FSM, ga.Entity):
                         # set bomb_flag (death trap).
                         obj.sprites[obj.frame].param = param // 2
                         if obj.sprites[obj.frame].param == 0:
-                            self.teleport_target = (0xec, XY(7 * gl.SPRITE_X, 1 * gl.SPRITE_Y))
+                            self.teleport_target = (
+                                gl.room_origin(0xec) +
+                                XY(7 * gl.SPRITE_X, 1 * gl.SPRITE_Y))
                             snd.play_sound('teleport')
                             self.new_state(self.state_teleport_out)
                             di.info_lines.add("Secret area found!")
@@ -815,8 +835,8 @@ class PlayerEntity(ga.FSM, ga.Entity):
         Check collision with enemies/hazards - matches ENEM_TEST (EB_HERO.C:601-626)
         Uses POS_COMPARE: expands player box by enemy size, checks enemy center.
         """
-        screen = gl.screen_manager.get_screen()
-        if not screen:
+        world = gl.screen_manager
+        if world is None:
             return
 
         pos = self.get_position()
@@ -826,7 +846,14 @@ class PlayerEntity(ga.FSM, ga.Entity):
         p_top = pos.y + self.enemy_bbox.y
         p_bottom = pos.y + self.enemy_bbox.y + self.enemy_bbox.height
 
-        for entity in screen.active:
+        # Coarse search around the player (enemies are never bigger than a
+        # couple of tiles, so one tile of padding is plenty).
+        search = pygame.Rect(p_left - gl.SPRITE_X, p_top - gl.SPRITE_Y,
+                             (p_right - p_left) + 2 * gl.SPRITE_X,
+                             (p_bottom - p_top) + 2 * gl.SPRITE_Y)
+        for entity in world.entities_in_rect(search):
+            if entity is self:
+                continue
             entity_type = type(entity).__name__
             is_enemy_type = isinstance(entity, (ga.EnemyPlatform, ga.EnemyFlying, ga.EnemyProjectile))
 
@@ -875,24 +902,17 @@ class PlayerEntity(ga.FSM, ga.Entity):
         # Collected disks are preserved via gl.disk_positions
         gl.screen_manager.reset_level()
 
-        # Get checkpoint position and screen
-        checkpoint_screen = gl.checkpoint.get_screen()
+        # Get checkpoint position (world coordinates)
         checkpoint_pos = gl.checkpoint.get_position()
 
         # If no checkpoint is set (shouldn't happen but safety check)
         if checkpoint_pos is None:
             logging.warning("No checkpoint set, using default spawn")
-            checkpoint_screen = 0
             checkpoint_pos = XY(0, 0)
 
         # Reset weapon power (EB.C:1389: gun_power = gun_temp = gun_temp_cntr = 0)
         self.power = 0
         self.ammo = 0
-
-        # Change to checkpoint screen (EB.C:1396-1397)
-        gl.screen_manager.change_screen(checkpoint_screen)
-        # Update global screen reference immediately
-        gl.screen = gl.screen_manager.get_screen()
 
         # Position player at checkpoint using stand() method (same as level load)
         respawn_pos = checkpoint_pos + XY(gl.SPRITE_X // 2, gl.SPRITE_Y)
@@ -908,16 +928,18 @@ class PlayerEntity(ga.FSM, ga.Entity):
         gl.killing_floor = False
 
         # Recalculate to_ground before state switch
-        self.to_ground = self.check_ground(gl.screen)
+        self.to_ground = self.check_ground()
 
         # Return to standing state
         self.switch_state(self.state_stand)
 
+        # Snap the camera to the respawn point (no smooth scroll after death)
+        gl.screen_manager.snap_camera()
+
         # Level-entry sample (hero_enter_level_proc EB_HERO.C:681)
         snd.play_sound('area')
 
-        logging.info("Respawned at checkpoint: screen=%d, pos=%s",
-                     checkpoint_screen, self.get_position())
+        logging.info("Respawned at checkpoint: pos=%s", self.get_position())
         di.info_lines.add("Respawned at checkpoint")
 
     def stand(self, position):
@@ -929,7 +951,7 @@ class PlayerEntity(ga.FSM, ga.Entity):
 
     def move(self):
         """Move player's entitu"""
-        move, touched = self.check_move(self.move_vector, self.screen, True)
+        move, touched = self.check_move(self.move_vector, None, True)
         self.touched.extend(touched)  # touch will be handled later
         pos = self.get_position()
         move_to = pos + move
@@ -937,31 +959,7 @@ class PlayerEntity(ga.FSM, ga.Entity):
         return move
 
     def check_touch(self):
-        self.touched.extend(self.get_touching((0, 0), self.screen))
-
-    def check_bounds(self):
-        """Check screen boundaries and change screens if neccessary."""
-        bbox = self.get_bbox()
-        pos = self.get_position()
-        below = self.get_bottom() - gl.MAX_Y
-        cs = gl.screen_manager.get_screen_number()
-        if below > 0:
-            cs += 16 if cs < 240 else -240
-            gl.screen_manager.change_screen(cs)
-            pos.y = - (bbox.y + bbox.h - below)
-            self.set_position(pos)
-        center = bbox.centerx + pos.x
-        cs = gl.screen_manager.get_screen_number()
-        if center < 0:
-            cs -= 1 if cs > 0 else -255
-            gl.screen_manager.change_screen(cs)
-            pos.x = gl.MAX_X + pos.x
-            self.set_position(pos)
-        elif center > gl.MAX_X:
-            cs += 1 if cs < 255 else -255
-            gl.screen_manager.change_screen(cs)
-            pos.x = pos.x - gl.MAX_X
-            self.set_position(pos)
+        self.touched.extend(self.get_touching((0, 0)))
 
     def update(self):
         """Update player behaviors."""
@@ -975,7 +973,7 @@ class PlayerEntity(ga.FSM, ga.Entity):
         if self.state not in [self.state_death, self.state_teleport_in, self.state_teleport_out]:
             self.check_enemy_collision()
         # keep track of to ground distance
-        self.to_ground = self.check_ground(self.screen)
+        self.to_ground = self.check_ground()
         di.debug_message(XY(16, 8), "to ground: %d" % self.to_ground)
         # casual mode: edge-detect a fresh UP press (used by double jump)
         self.up_pressed = self.controller.up and not self.prev_up
@@ -998,8 +996,6 @@ class PlayerEntity(ga.FSM, ga.Entity):
                     self.fired = True
         else:
             self.fired = False
-        # check for screen boundaries (thus screen change)
-        self.check_bounds()
         # handle objects touched
         self.handle_touch()
         # handle weapon's power usage and cooldown
@@ -1008,8 +1004,11 @@ class PlayerEntity(ga.FSM, ga.Entity):
         self.show_hud()
         # display some status information
         di.status_line.add("%s" % str(self.position))
-        di.status_line.add(" | screen: %d" %
-                           gl.screen_manager.get_screen_number())
+        di.status_line.add(" | room: %d" %
+                           gl.room_of(self.position.x, self.position.y))
+        if gl.camera is not None:
+            di.status_line.add(" | cam: %d,%d" %
+                               (int(gl.camera.x), int(gl.camera.y)))
         di.status_line.add(" | running state: %s " % self.state.__name__)
         if self.touched:
             di.status_line.add(" | touching: %d" % len(self.touched))
@@ -1100,15 +1099,21 @@ class Projectile(ga.Entity):
         # Move projectile
         self.position.x += self.step
 
-        # Check screen boundaries - matches OBJ_OUT path in
-        # short_miss_proc / long_miss_proc / bow_proc (EB_HERO.C:224, 252, 282)
-        # which simply does REMOVE_OBJ with no explosion or sound, regardless
-        # of weapon level. The triple-explosion is exclusive to bow_end_proc
-        # (the wall-hit path), not the screen-exit path.
-        if self.position.x > gl.SCREEN_X * gl.SPRITE_X or self.position.x < -gl.SPRITE_X:
-            logging.debug("Projectile exited screen at x=%d", self.position.x)
-            self.vanish()
-            return
+        # Check the activity-zone boundary: the projectile lives until its
+        # box has completely left the viewport inflated by half a viewport.
+        # Like the OBJ_OUT path in short_miss_proc / long_miss_proc /
+        # bow_proc (EB_HERO.C:224, 252, 282) it simply disappears - no
+        # explosion and no sound, regardless of the weapon level.
+        world = gl.screen_manager
+        if world is not None:
+            activity = world.activity_rect()
+            rect = self.world_rect()
+            if (rect.right < activity.left or rect.left > activity.right or
+                    rect.bottom < activity.top or rect.top > activity.bottom):
+                logging.debug("Projectile left the activity zone at x=%d",
+                              self.position.x)
+                self.vanish()
+                return
 
         # Check collision with solid walls (EB_HERO.C:234-242, 262-269)
         # cave_test in C blocks projectile when hitting solid sprites,
@@ -1140,8 +1145,8 @@ class Projectile(ga.Entity):
         Matches cave_test() blocking behavior in EB_HERO.C:234-242 (short_miss),
         262-269 (long_miss), 293-310 (bow).
         """
-        screen = gl.screen_manager.get_screen()
-        if not screen:
+        world = gl.screen_manager
+        if world is None:
             return False
         rel = self.get_bbox()
         me = pygame.Rect(self.position.x + rel.x,
@@ -1151,10 +1156,8 @@ class Projectile(ga.Entity):
         # (EB_HERO.C:285-286: YE += 18 in miss_enem_test setup)
         if self.power_level == 5:
             me.height = gl.SPRITE_Y * 2 - 12
-        for obj in screen.collisions:
-            you = obj.get_bbox().copy()
-            you.move_ip(obj.get_position())
-            if not me.colliderect(you):
+        for obj in world.colliders_in_rect(me):
+            if obj is self:
                 continue
             sides = obj.get_sides()
             # Only block if the wall has a side facing the projectile's direction
@@ -1172,12 +1175,15 @@ class Projectile(ga.Entity):
         Based on miss_enem_test() from EB_HERO.C:167-193 which loops through
         ALL enemies and can hit multiple in one frame.
         """
-        screen = gl.screen_manager.get_screen()
-        if not screen:
+        world = gl.screen_manager
+        if world is None:
             return False
 
-        # Create a copy of the list to avoid issues if entities are removed during iteration
-        entities_to_check = list(screen.active)
+        # Only entities near the projectile can collide with it
+        search = self.world_rect().inflate(gl.SPRITE_X * 2, gl.SPRITE_Y * 2)
+        # Create a copy of the list to avoid issues if entities are removed
+        # during iteration (hit_object() removes the object right away)
+        entities_to_check = list(world.entities_in_rect(search))
         hit_enemy_this_frame = False
         hit_object = False
 
@@ -1337,17 +1343,14 @@ class Projectile(ga.Entity):
             # Add broken sprite to screen and level data NOW, then show explosion on top.
             obj.vanish()  # Remove original object first
 
-            if gl.screen:
-                # Add broken sprite immediately (it will be drawn before the explosion)
-                gl.screen.active.append(broken_entity)
-            # Persist to level data so it survives screen changes
-            screen_num = gl.screen_manager.get_screen_number()
-            gl.screen_manager.add_to_level_data(screen_num, broken_entity)
-
-            # Create explosion (will be drawn on top of broken sprite)
-            explosion = ga.Explosion(explosion_sprites, XY(exp_x, exp_y))
-            if gl.screen:
-                gl.screen.active.append(explosion)
+            world = gl.screen_manager
+            if world is not None:
+                # Add broken sprite immediately (it will be drawn before the
+                # explosion) and keep it in the level data, so it survives
+                # level resets and save games.
+                world.spawn(broken_entity)
+                # Create explosion (will be drawn on top of broken sprite)
+                world.spawn(ga.Explosion(explosion_sprites, XY(exp_x, exp_y)))
             snd.play_sound('blast')
         else:
             # Non-breakable: explosion only, no broken sprite left behind

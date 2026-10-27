@@ -4,6 +4,8 @@ Global variables module
 
 import copy
 
+import pygame
+
 # pylint: disable-msg=C0103
 
 # PyGame related globals
@@ -37,9 +39,61 @@ DISPLAY_OFFSET = (OFFSET_X, OFFSET_Y)
 # Set by emdisplay.init_display() and applied to the whole render.
 RENDER_SCALE = 1.0
 
+# World grid: 16x16 rooms, room index = gy * 16 + gx
+ROOMS_X = 16
+ROOMS_Y = 16
+ROOMS_TOTAL = ROOMS_X * ROOMS_Y
+
+
+class Camera:
+    """
+    Scrolling camera.
+
+    x, y - world coordinates of the viewport's top-left corner (game px).
+    ``enabled`` switches the camera *mode*: True - the viewport follows the
+    hero continuously (seamless scrolling); False - the viewport is pinned
+    to the hero's room, which gives the old page-based picture.
+    """
+    def __init__(self):
+        self.x = 0
+        self.y = 0
+        self.enabled = True
+
+    def viewport(self):
+        """Return current viewport as a world rect."""
+        return pygame.Rect(self.x, self.y, MAX_X, MAX_Y)
+
+    def activity_rect(self):
+        """
+        Return the activity rect: viewport inflated by half a viewport
+        in every direction (2x2 viewports in total).
+        """
+        return self.viewport().inflate(MAX_X, MAX_Y)
+
+
+camera = None  # set to Camera() by the gameplay module
+
 
 def render_pos(x, y):
-    """Convert game (1x) coordinates to physical render pixels."""
+    """
+    Convert world game (1x) coordinates to physical render pixels.
+
+    There is exactly ONE rounding per coordinate: only the offset from the
+    camera is scaled, never the absolute world position (CAMERA_PLAN.md 4.2).
+    """
+    s = 2.0 * RENDER_SCALE
+    cam = camera
+    if cam is not None:
+        return (int(round((x - cam.x) * s)),
+                int(round((y - cam.y) * s)))
+    return (int(round(x * s)), int(round(y * s)))
+
+
+def view_pos(x, y):
+    """Convert viewport (1x playfield) coordinates to physical render pixels.
+
+    Used by the HUD, which is always bound to the frame and never scrolls.
+    """
     s = 2.0 * RENDER_SCALE
     return (int(round(x * s)), int(round(y * s)))
 
@@ -72,15 +126,14 @@ loop_main_loop = True  # loop the main gameplay loop
 player = None  # player's character entity
 checkpoint = None  # active checkpoint
 checkpoint_entity = None  # Checkpoint sprite of the current respawn point
-disabled_checkpoints = set()  # (level, screen, x, y) of retired checkpoints
+disabled_checkpoints = set()  # (level, world_x, world_y) retired checkpoints
 enemies = None  # data class for enemies
 weapons = None  # data class for weapons
-screen = None  # current screen definition
 info = None  # data class for info sprites
 sound_manager = None  # sound effects manager
 counter = 0 # +1 every loop
 disks = 0 # number of disks collected
-disk_positions = [] # list of (screen, position) for collected disks (EB.C:1391-1395)
+disk_positions = [] # world positions of collected disks (EB.C:1391-1395)
 exit_level_flag = False # set when player exits level
 next_level_code = 0 # next level to load (from exit sprite param)
 killing_floor = False # set when KillingFloor entity activates
@@ -192,6 +245,21 @@ class XY:
             raise ValueError("XY() object required.")
         obj = xy.copy()
         return obj
+
+
+def room_of(x, y):
+    """Return the room (screen) number of a world position."""
+    return (int(y) // MAX_Y) * ROOMS_X + (int(x) // MAX_X)
+
+
+def room_origin(room):
+    """Return the world position (top-left corner) of a room."""
+    return XY((room % ROOMS_X) * MAX_X, (room // ROOMS_X) * MAX_Y)
+
+
+def local_tile(x, y):
+    """Return the local (inside-room) tile coordinates of a world position."""
+    return ((int(x) % MAX_X) // SPRITE_X, (int(y) % MAX_Y) // SPRITE_Y)
 
 
 # other global functions
