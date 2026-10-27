@@ -403,13 +403,32 @@ class Level(LevelData):
             entity.set_origin(screen)  # remember screen for deletion
             entity.sprite_index = sidx  # Store for broken sprite lookup
             screen.active.append(entity)
-            if isinstance(entity, ga.Checkpoint) and param == 1:
-                # active checkpoint - level start (only update if different)
+            if isinstance(entity, ga.Checkpoint):
                 level_number = gl.level_names.index(self.name)
-                if (gl.checkpoint.get_level() != level_number or
-                    gl.checkpoint.get_screen() != screen_number or
-                    gl.checkpoint.get_position() != position):
-                    gl.checkpoint.update(level_number, screen_number, position)
+                key = (level_number, screen_number, position.x, position.y)
+                if gl.checkpoint is None:
+                    is_current = False
+                    has_level_checkpoint = False
+                else:
+                    is_current = (
+                        gl.checkpoint.get_level() == level_number and
+                        gl.checkpoint.get_screen() == screen_number and
+                        gl.checkpoint.get_position() == position)
+                    has_level_checkpoint = (
+                        gl.checkpoint.get_level() == level_number)
+                if key in gl.disabled_checkpoints:
+                    # retired checkpoint - permanently inactive
+                    entity.deactivate()
+                elif is_current:
+                    # this sprite is the current respawn point
+                    entity.activate()
+                    gl.checkpoint_entity = entity
+                elif param == 1 and not has_level_checkpoint:
+                    # a fresh level: its entrance becomes the checkpoint
+                    gl.checkpoint.update(level_number, screen_number,
+                                         position)
+                    entity.activate()
+                    gl.checkpoint_entity = entity
         else:
             entity = ga.Entity([sprite], position)
             entity.sprite_index = sidx  # Store for broken sprite lookup

@@ -878,27 +878,77 @@ class Checkpoint(Entity):
     def __init__(self, sprites, position):
         Entity.__init__(self, sprites, position)
         self.activated = False
+        self.spent = False  # retired checkpoint: can never be activated again
         # Load activation cross sprite from info set
         self.cross_sprite = None
         if gl.info:
             self.cross_sprite = gl.info.get_sprite(5)  # small cross sprite
 
+    def _frame_for_param(self, param_value, fallback):
+        """
+        Return the animation frame whose status byte 'param' matches.
+        The sprite set encodes the checkpoint state this way: the frame with
+        param = 1 is the current/active look, the frame with param = 0 is the
+        unvisited (inactive) look.
+        """
+        for index, sprite in enumerate(self.sprites):
+            if sprite is not None and sprite.param == param_value:
+                return index
+        return fallback
+
     def activate(self):
-        """Visual indication checkpoint is now active"""
+        """Make this checkpoint the current (active) respawn point."""
         self.activated = True
-        # Change to last frame if multiple frames available
-        if len(self.sprites) > 1:
-            self.frame = len(self.sprites) - 1
+        self.spent = False
+        # current checkpoint uses the param = 1 frame
+        self.frame = self._frame_for_param(1, max(0, len(self.sprites) - 1))
+
+    def deactivate(self):
+        """
+        Retire this checkpoint after another one was activated.
+        A retired checkpoint stays inactive and cannot be re-activated.
+        """
+        self.activated = False
+        self.spent = True
+        # inactive look is the param = 0 frame
+        self.frame = self._frame_for_param(0, 0)
 
     def display(self):
-        """Display checkpoint with cross overlay if activated"""
+        """Display checkpoint; the cross marks already retired ones."""
         Entity.display(self)
-        # Display cross sprite overlay when activated
-        if self.activated and self.cross_sprite:
+        # Cross overlay is drawn only on retired (spent) checkpoints
+        if self.spent and self.cross_sprite:
             pos = self.get_position()
             scaled_cross = di.scale_sprite(self.cross_sprite.image)
             scaled_pos = gl.render_pos(pos.x, pos.y)
             gl.display.blit(scaled_cross, scaled_pos)
+
+
+def sync_checkpoint_entities():
+    """
+    Align checkpoint sprites with the active checkpoint data: the sprite at
+    the current respawn point becomes active, the rest keep their state
+    (retired ones stay spent).
+    """
+    if gl.checkpoint is None or gl.screen_manager is None:
+        return
+    screens = gl.screen_manager.get_screens()
+    screen_number = gl.checkpoint.get_screen()
+    position = gl.checkpoint.get_position()
+    if not screens or screen_number is None or position is None:
+        return
+    if not 0 <= screen_number < len(screens):
+        return
+    screen = screens[screen_number]
+    if not screen:
+        return
+    for item in screen.active:
+        if isinstance(item, Checkpoint) and item.get_position() == position:
+            item.activate()
+            gl.checkpoint_entity = item
+            logging.info("Checkpoint sprite synced: screen=%d pos=%s",
+                         screen_number, position)
+            return
 
 
 class Teleport(Entity):

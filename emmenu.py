@@ -335,6 +335,8 @@ class SaveGame:
             pos_x = self.data.get('position_x', 0)
             pos_y = self.data.get('position_y', 0)
             gl.checkpoint.update(level, screen, XY(pos_x, pos_y))
+            # the sprite reference will be re-resolved when the level loads
+            gl.checkpoint_entity = None
 
             # Set disk count
             gl.disks = self.data.get('disks', 0)

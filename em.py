@@ -32,6 +32,8 @@ class Gameplay:
         gl.info = ot.Info()
         di.indicators = di.Indicators()
         gl.checkpoint = ga.ActiveCheckpoint()
+        gl.checkpoint_entity = None
+        gl.disabled_checkpoints.clear()
         gl.sound_manager = snd.SoundManager()
         # initialize rest
         self.loop = True
@@ -274,6 +276,12 @@ class Gameplay:
             di.info_lines.add("Sound: %s" % ("ON" if enabled else "OFF"))
 
     def load_level(self):
+        # Fresh level/attempt: no checkpoint of this level has been retired
+        gl.disabled_checkpoints.clear()
+        gl.checkpoint_entity = None
+        # Loading the level lets it adopt its own entrance checkpoint (the
+        # sprite with param = 1, EB.C level data) when the active checkpoint
+        # belongs to another level - see Level.process() in emdata.py.
         gl.level.load(gl.level_names[gl.current_level])
         gl.screen_manager.add_screens(gl.level.get_screens())
         self.screens_map = self.init_map
@@ -289,7 +297,15 @@ class Gameplay:
         if start_position:
             start_position += XY(gl.SPRITE_X // 2, gl.SPRITE_Y)
             gl.screen_manager.change_screen(start_screen)
+            gl.screen = gl.screen_manager.get_screen()
             gl.player.stand(start_position)
+            # Enter the level exactly like respawn() after death: a clean
+            # standing state with the distance to the ground recalculated
+            gl.player.death_timer = 0
+            gl.player.invuln_timer = 0
+            gl.player.touched = []
+            gl.player.to_ground = gl.player.check_ground(gl.screen)
+            gl.player.switch_state(gl.player.state_stand)
             # Level-entry sample (hero_enter_level_proc EB_HERO.C:681)
             import emsound as snd
             snd.play_sound('area')
@@ -301,7 +317,8 @@ class Gameplay:
         restart_level), which loops back into electro_body -> new_level():
         a full fresh reload - start position, disks, weapon all reset.
         """
-        gl.checkpoint.update(gl.current_level, 0, XY(0, 0))
+        # level number -1 forces the level entrance to become the checkpoint
+        gl.checkpoint.update(-1, 0, XY(0, 0))
         mn.show_loading_animation()
         self.load_level()
         gl.screen = gl.screen_manager.get_screen()
@@ -377,8 +394,9 @@ class Gameplay:
                         gl.loop_main_loop = False
                     else:
                         gl.current_level = gl.next_level_code
-                        # Reset checkpoint to level start
-                        gl.checkpoint.update(gl.current_level, 0, XY(0, 0))
+                        # level -1 forces the new level's own entrance
+                        # checkpoint to be adopted on load (like a new game)
+                        gl.checkpoint.update(-1, 0, XY(0, 0))
                         mn.show_loading_animation()
                         self.load_level()
                         di.info_lines.add("Level %d: %s" % (gl.current_level + 1, gl.level_names[gl.current_level]))
@@ -422,8 +440,12 @@ class Gameplay:
         gl.next_level_code = 0
         gl.killing_floor = False
         gl.game_completed = False
-        # Reset checkpoint to beginning of level 1
-        gl.checkpoint.update(0, 0, XY(0, 0))
+        # Level -1 means "no checkpoint of this level yet": the entrance
+        # checkpoint stored in the level data becomes the respawn point
+        # (same rule restart_level() uses).
+        gl.disabled_checkpoints.clear()
+        gl.checkpoint_entity = None
+        gl.checkpoint.update(-1, 0, XY(0, 0))
         # Reset player state
         if gl.player:
             gl.player.power = 0

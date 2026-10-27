@@ -476,6 +476,59 @@ class PlayerEntity(ga.FSM, ga.Entity):
         self.ammo = self.magazine[self.power]
         di.info_lines.add("battery collected")
 
+    def activate_checkpoint(self, obj):
+        """
+        Make the touched checkpoint the current respawn point.
+
+        The previously active checkpoint is retired: it loses its cross,
+        becomes permanently inactive and can never be activated again.
+        Returns True when a new checkpoint was activated.
+        """
+        if getattr(obj, "spent", False):
+            return False
+        current_screen = gl.screen_manager.get_screen_number()
+        current_pos = obj.get_position()
+        is_current = (gl.checkpoint.get_screen() == current_screen and
+                      gl.checkpoint.get_position() == current_pos)
+        if is_current:
+            return False
+
+        # retire the previous checkpoint
+        prev_pos = gl.checkpoint.get_position()
+        if prev_pos is not None:
+            prev_level = gl.checkpoint.get_level()
+            prev_screen = gl.checkpoint.get_screen()
+            gl.disabled_checkpoints.add(
+                (prev_level, prev_screen, prev_pos.x, prev_pos.y))
+            prev_entity = gl.checkpoint_entity
+            if (prev_entity is not None and
+                    prev_entity.get_position() == prev_pos):
+                prev_entity.deactivate()
+            else:
+                # stale reference: find the sprite by its screen and position
+                screens = gl.screen_manager.get_screens()
+                if screens and isinstance(prev_screen, int):
+                    old_screen = screens[prev_screen]
+                    if old_screen:
+                        for item in old_screen.active:
+                            if (isinstance(item, ga.Checkpoint) and
+                                    item.get_position() == prev_pos):
+                                item.deactivate()
+
+        # the touched checkpoint becomes the current respawn point
+        gl.checkpoint.update(gl.current_level, current_screen, current_pos)
+        obj.activate()
+        gl.checkpoint_entity = obj
+
+        # Reset weapon stats to 0 (EB_HERO.C:519)
+        self.power = 0
+        self.temp = 0
+        self.select_weapon(0)
+        logging.info("Checkpoint activated: screen=%d pos=%s",
+                     current_screen, current_pos)
+        return True
+
+
     def power_and_cooldown(self):
         """
         Handle power usage and weapon cooldown.
@@ -537,26 +590,13 @@ class PlayerEntity(ga.FSM, ga.Entity):
                         self.find_teleport_target(obj.get_position())
                         self.new_state(self.state_teleport_out)
                 elif touch_type == 3:
-                    # checkpoint - activate if different from current
-                    current_screen = gl.screen_manager.get_screen_number()
-                    current_pos = obj.get_position()
-
-                    # Only activate if different checkpoint (EB_HERO.C:514)
-                    if (gl.checkpoint.get_screen() != current_screen or
-                        gl.checkpoint.get_position() != current_pos):
-                        # Update checkpoint
-                        gl.checkpoint.update(gl.current_level, current_screen, current_pos)
-
-                        # Reset weapon stats to 0 (EB_HERO.C:519)
-                        self.power = 0
-                        self.temp = 0
-                        self.select_weapon(0)
-
-                        # Visual feedback
-                        if hasattr(obj, 'activate'):
-                            obj.activate()
+                    # checkpoint
+                    if getattr(obj, "spent", False):
+                        # retired checkpoint - can never be activated again
+                        di.info_lines.add("Checkpoint is inactive")
+                        continue
+                    if self.activate_checkpoint(obj):
                         di.info_lines.add("Checkpoint activated")
-
                         # AUTO-SAVE on checkpoint activation
                         import emmenu as mn
                         if mn.save_current_game():
