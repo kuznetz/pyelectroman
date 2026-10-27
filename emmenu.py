@@ -6,6 +6,7 @@ import emdata as da
 import emsound as snd
 import emdisplay as di
 import pygame
+import emquicksave as qs
 import os
 import json
 import logging
@@ -391,7 +392,8 @@ class MainMenu:
     def init(self):
         """Initialize the menu (load sprites, check save state)."""
         self.letters.load()
-        self.has_save = self.save_game.exists()
+        # CONTINUE restores the quick save (same file as F5 / exit prompt)
+        self.has_save = os.path.exists(qs.get_quick_save_path())
 
         # If no save, start with NEW GAME selected
         if not self.has_save:
@@ -798,9 +800,22 @@ def show_main_menu():
     return menu.run()
 
 
+def load_quick_game():
+    """
+    Restore the game state from the quick save (quick.sav).
+
+    Used by the CONTINUE menu entry, so it picks up exactly the state
+    written by F5 or by the "save game (y or n)" prompt on exit.
+
+    Returns:
+        True if successful, False otherwise
+    """
+    return qs.load_quick()
+
+
 def load_saved_game():
     """
-    Load saved game and apply to globals.
+    Load the checkpoint save (pyelectroman.sav) and apply it to globals.
 
     Returns:
         True if successful, False otherwise

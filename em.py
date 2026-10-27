@@ -57,7 +57,9 @@ class Gameplay:
                              pygame.K_d: self.on_k_d,
                              pygame.K_f: self.on_k_f,
                              pygame.K_r: self.on_k_r,
-                             pygame.K_F7: self.on_k_f7}
+                             pygame.K_F5: self.on_k_f5,
+                             pygame.K_F7: self.on_k_f7,
+                             pygame.K_F9: self.on_k_f9}
         self.deferred = None
         self.quit_ask = False
         self.restart_ask = False
@@ -269,11 +271,38 @@ class Gameplay:
             gl.disks = 3
             di.info_lines.add("Debug: 3 disks added")
 
+    def quick_save(self):
+        """
+        Quick save the current game state to quick.sav.
+
+        Returns True on success. Used by F5 and by the "save game (y or n)"
+        prompt shown when leaving a level (Esc / gamepad START).
+        """
+        import emquicksave as qs
+        if qs.save_quick():
+            di.info_lines.add("Quick save: %s" % qs.QUICK_SAVE_FILE)
+            return True
+        di.info_lines.add("Quick save failed")
+        return False
+
+    def on_k_f5(self):
+        """Quick save the current game state to quick.sav (F5)."""
+        self.quick_save()
+
     def on_k_f7(self):
         """Toggle sound effects on/off (F7 - matches original game)"""
         if gl.sound_manager:
             enabled = gl.sound_manager.toggle()
             di.info_lines.add("Sound: %s" % ("ON" if enabled else "OFF"))
+
+    def on_k_f9(self):
+        """Quick load the game state from quick.sav (F9)."""
+        import emquicksave as qs
+        if qs.load_quick():
+            self.screens_map = self.init_map
+            di.info_lines.add("Quick load: %s" % qs.QUICK_SAVE_FILE)
+        else:
+            di.info_lines.add("Quick load failed")
 
     def load_level(self):
         # Fresh level/attempt: no checkpoint of this level has been retired
@@ -372,6 +401,20 @@ class Gameplay:
         mn.show_loading_animation()
         self.load_level()
 
+    def resume(self):
+        """
+        Enter gameplay with a state already restored by a quick load.
+
+        Unlike start(), the level is not reloaded from the checkpoint:
+        load_quick() has already reinstated the level, the screen and the
+        player, so only the per-session helpers are refreshed here.
+        """
+        gl.screen = gl.screen_manager.get_screen()
+        self.screens_map = self.init_map
+        gl.exit_level_flag = False
+        gl.killing_floor = False
+        di.info_lines.add("Game loaded")
+
     def run(self):
         gl.loop_main_loop = True
         self.quit_ask = False
@@ -418,8 +461,12 @@ class Gameplay:
             if self.quit_ask:
                 self.quit_ask = False
                 self.restart_ask = False
-                if mn.ask_confirmation("quit*(y or n)"):
-                    gl.loop_main_loop = False
+                # Leaving the level (Esc / gamepad START): offer to keep the
+                # progress. Both answers leave the level, Y additionally
+                # writes quick.sav which the menu's CONTINUE restores.
+                if mn.ask_confirmation("save game*(y or n)"):
+                    self.quick_save()
+                gl.loop_main_loop = False
             elif self.restart_ask:
                 self.restart_ask = False
                 if mn.ask_confirmation("restart*level?*(y or n)"):
@@ -497,12 +544,14 @@ def fast_main():
             running = False
             continue
 
+        resumed = False
         if menu_result == "continue":
-            # Load saved game
-            if mn.load_saved_game():
-                di.info_lines.add("Game loaded")
+            # CONTINUE restores the quick save (quick.sav) written by F5 or
+            # by the "save game (y or n)" prompt when leaving a level
+            if mn.load_quick_game():
+                resumed = True
             else:
-                di.info_lines.add("Failed to load save")
+                di.info_lines.add("Failed to load quick save")
                 continue
 
         elif menu_result == "new_game":
@@ -511,7 +560,10 @@ def fast_main():
             di.info_lines.add("New game started")
 
         # Start and run gameplay
-        gameplay.start()
+        if resumed:
+            gameplay.resume()
+        else:
+            gameplay.start()
         gameplay.run()
         gameplay.stop()
 

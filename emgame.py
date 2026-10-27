@@ -88,6 +88,9 @@ class Entity:
         if not isinstance(position, XY):
             raise ValueError("Entity position must by XY() instance.")
         self.position = position
+        # Spawn ("home") position: never changes when the entity moves, so
+        # save/load can locate this very object in the recreated level data.
+        self.home_position = XY.from_self(position)
         self.frame = 0
         self.delay = 0
         self.deferred = None

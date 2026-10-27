@@ -16,8 +16,12 @@ This document lists all keyboard shortcuts available in the Python version of Py
 
 | Key | Action |
 |-----|--------|
-| Esc | Quit game |
-| Alt+X | Quit game (matches original DOS version) |
+| Esc | Leave the level and return to the menu; asks "save game (y or n)" |
+| Alt+X | Quit the program immediately (matches original DOS version) |
+
+Answering **y** to the "save game (y or n)" prompt writes `quick.sav`;
+answering **n** leaves the level without saving. In both cases the game
+returns to the main menu.
 
 ## Level Navigation
 
@@ -63,6 +67,20 @@ Note: The level is arranged in a 16x16 grid of 256 screens.
 | Shift+3 | Select weapon level 3 (long missile variant) |
 | Shift+4 | Select weapon level 4 (penetrating missile) |
 | Shift+5 | Select weapon level 5 (bow - double height, triple explosion) |
+
+## Quick Save / Load
+
+| Key | Action |
+|-----|--------|
+| F5 | Quick save the game to `quick.sav` (project root) |
+| F9 | Quick load the game from `quick.sav` |
+
+`quick.sav` is also written when leaving a level and answering **y** to
+the "save game (y or n)" prompt, and the main menu entry **CONTINUE**
+restores it (it is greyed out when no quick save exists).
+
+The save file is JSON. It stores all JSON-serializable variables from
+`emglobals` plus player, checkpoint and current screen snapshots.
 
 ## Visual Debug
 
