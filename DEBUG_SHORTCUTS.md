@@ -12,6 +12,33 @@ This document lists all keyboard shortcuts available in the Python version of Py
 | Arrow Down | Duck |
 | Space | Fire weapon |
 
+## Gamepad Controls (Xbox Layout)
+
+Any connected gamepad is polled together with the keyboard and can be
+plugged in or out at runtime. The same pad also drives the menus.
+
+### In game
+
+| Control | Action |
+|---------|--------|
+| Left stick left / right (D-pad also works) | Move left / right |
+| Left stick down / D-pad down | Down / duck (same as the Down arrow key) |
+| A | Jump |
+| B | Down / duck (same as the Down arrow key) |
+| X | Fire weapon |
+| START | Exit the level (same as Esc, with the "save game (y or n)" prompt) |
+
+### In menus
+
+| Control | Action |
+|---------|--------|
+| Left stick up / down, D-pad up / down | Move selection (auto-repeats when held) |
+| A or START | Confirm / press fire |
+| B | Back / quit (in the "exit to dos?" prompt: NO) |
+| X | Press fire on title / level-completed / congratulations screens |
+| Left stick left / right (on the mode entry) | Switch casual / hardcore |
+| A or START in the "y or n" prompt | YES |
+
 ## Game Exit
 
 | Key | Action |

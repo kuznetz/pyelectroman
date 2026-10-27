@@ -373,7 +373,14 @@ class Gameplay:
                 # Handle key press events (single trigger, not continuous)
                 elif event.key in self.key_handlers:
                     self.key_handlers[event.key]()
+            elif event.type in (pygame.JOYDEVICEADDED,
+                                pygame.JOYDEVICEREMOVED):
+                # track gamepad hot-plugging
+                self.controller.handle_event(event)
         self.controller.update()
+        if self.controller.exit:
+            # gamepad START quits the level, same as Esc (with confirmation)
+            self.on_k_escape()
 
     def loop_run(self):
         gl.screen = gl.screen_manager.get_screen()

@@ -8,15 +8,26 @@ from emglobals import XY
 import pygame
 import copy
 import logging
+import empad
 
 
 class Controller:
     """
     Class representing player's input.
-    Currently only keyboard is reported.
-    Joystick and gamepad controllers planned for the future.
+
+    Keyboard is always reported. Connected gamepads with the Xbox layout
+    are polled as well:
+
+      * left stick left/right (D-pad also works) - walk
+      * left stick down (D-pad down also works) - down
+      * A - jump
+      * B - down (same as the Down arrow key)
+      * X - fire
+      * START - quit the level (same as the Esc key)
+
     Singleton by design.
     """
+
     def __init__(self):
         # pylint complains when those are defined via calling clear()
         self.left = False
@@ -25,6 +36,12 @@ class Controller:
         self.down = False
         self.fire = False
         self.debug = False
+        # set for a single frame when START is pressed (edge)
+        self.exit = False
+        self.gamepad = empad.get_gamepad()
+        # suppress the edge on the first poll: the game may be started
+        # with START still held down in the menu
+        self._prev_start = True
 
     def clear(self):
         self.left = False
@@ -33,6 +50,10 @@ class Controller:
         self.down = False
         self.fire = False
         self.debug = False
+
+    def handle_event(self, event):
+        """Track gamepad hot-plugging."""
+        self.gamepad.handle_event(event)
 
     def update(self):
         """Update controller settings"""
@@ -54,6 +75,25 @@ class Controller:
                 self.fire = True
         else:
             self.debug = True
+        self.update_gamepad()
+
+    def update_gamepad(self):
+        """Read the gamepad state (summed up with the keyboard)."""
+        state = self.gamepad.poll()
+        if state.left:
+            self.left = True
+        if state.right:
+            self.right = True
+        if state.down:
+            self.down = True
+        if state.a:
+            self.up = True
+        if state.b:
+            self.down = True
+        if state.x:
+            self.fire = True
+        self.exit = state.start and not self._prev_start
+        self._prev_start = state.start
 
 
 class FSM:

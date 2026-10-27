@@ -6,6 +6,7 @@ import emdata as da
 import emsound as snd
 import emdisplay as di
 import pygame
+import empad
 import emquicksave as qs
 import os
 import json
@@ -388,6 +389,21 @@ class MainMenu:
         self.result = None
         self.arrow_visible = True
         self.arrow_timer = 0
+        # gamepad support (edge-triggered menu navigation)
+        self.gamepad = empad.get_gamepad()
+        self.menu_pad = empad.MenuPad(self.gamepad)
+
+    def get_options(self):
+        """Return menu labels, with the mode entry showing the current mode."""
+        labels = list(self.OPTIONS)
+        labels[self.MODE_INDEX] = "CASUAL" if gl.casual else "HARDCORE"
+        return labels
+
+    def toggle_mode(self):
+        """Switch between casual and hardcore game modes."""
+        gl.casual = not gl.casual
+        logging.info("Game mode: %s", "casual" if gl.casual else "hardcore")
+        snd.play_sound('ask')
 
     def init(self):
         """Initialize the menu (load sprites, check save state)."""
@@ -400,11 +416,15 @@ class MainMenu:
             self.selected = 1
 
     def handle_input(self):
-        """Handle keyboard input."""
+        """Handle keyboard and gamepad input."""
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.result = "quit"
                 self.running = False
+
+            elif event.type in (pygame.JOYDEVICEADDED,
+                                pygame.JOYDEVICEREMOVED):
+                self.gamepad.handle_event(event)
 
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_UP:
@@ -420,6 +440,23 @@ class MainMenu:
                 elif event.key == pygame.K_ESCAPE:
                     self.result = "quit"
                     self.running = False
+        self.handle_gamepad()
+
+    def handle_gamepad(self):
+        """Handle edge-triggered gamepad navigation (D-pad/left stick)."""
+        actions = self.menu_pad.poll()
+        if actions["up"]:
+            self.move_selection(-1)
+        elif actions["down"]:
+            self.move_selection(1)
+        elif actions["left"] or actions["right"]:
+            if self.selected == self.MODE_INDEX:
+                self.toggle_mode()
+        elif actions["confirm"]:
+            self.select_option()
+        elif actions["back"]:
+            self.result = "quit"
+            self.running = False
 
     def move_selection(self, direction):
         """Move selection up or down."""
@@ -527,7 +564,9 @@ class MainMenu:
         """Draw instruction text at bottom of screen."""
         font = gl.font["small"] if gl.font["small"] else pygame.font.SysFont("tahoma", 20)
 
-        instructions = "UP/DOWN: Select   ENTER: Confirm   ESC: Quit"
+        instructions = ("UP/DOWN or PAD: Select   ENTER/A: Confirm   "
+                        "LEFT/RIGHT: Mode   ESC/B: Quit")
+        # font is already created at the physical size
         text_surface = font.render(instructions, True, (150, 150, 150))
         text_rect = text_surface.get_rect(
             center=(surface.get_width() // 2,
@@ -599,6 +638,9 @@ class MusicScreen:
         self.overlay_tile = _load_info_sprite(6)  # filler tile (EB.C:1231)
         self.esc_flag = False
         self.result = None
+        # gamepad support: A/Start/X advance, B opens the exit prompt
+        self.gamepad = empad.get_gamepad()
+        self.menu_pad = empad.MenuPad(self.gamepad)
 
     def _load_bmp(self, name):
         path = os.path.join(gl.data_folder, name)
@@ -646,6 +688,9 @@ class MusicScreen:
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 self.result = "quit"
+            elif event.type in (pygame.JOYDEVICEADDED,
+                                pygame.JOYDEVICEREMOVED):
+                self.gamepad.handle_event(event)
             elif event.type == pygame.KEYDOWN:
                 if self.esc_flag:
                     if event.key == pygame.K_y:
@@ -656,6 +701,21 @@ class MusicScreen:
                     self.result = "done"
                 elif event.key == pygame.K_ESCAPE:
                     self.esc_flag = True
+        self.handle_gamepad()
+
+    def handle_gamepad(self):
+        """Gamepad: A/START/X press fire, B is Esc (exit prompt)."""
+        actions = self.menu_pad.poll()
+        if self.esc_flag:
+            # the "exit to dos? (y or n)" prompt: confirm / cancel
+            if actions["confirm"] or actions["fire"]:
+                self.result = "quit"
+            elif actions["back"]:
+                self.esc_flag = False
+        elif actions["confirm"] or actions["fire"]:
+            self.result = "done"
+        elif actions["back"]:
+            self.esc_flag = True
 
     def run(self):
         """Show the screen until fire is pressed. Returns "done" or "quit"."""
@@ -725,13 +785,16 @@ def ask_confirmation(message):
     In-game Y/N confirmation prompt (EB.C:1103-1129): plays ask_s, covers
     the 13x8 playfield with filler tiles over the current frame, prints the
     message ('*' = newline) and blocks until Y or N is pressed.
-    Used for "quit (y or n)" and "restart level? (y or n)".
+    Used for "save game (y or n)" and "restart level? (y or n)".
+    Gamepad: A/START = yes, B = no.
     Returns True on Y (or window close), False on N.
     """
     letters = Letters()
     letters.load()
     tile = _load_info_sprite(6)
     snd.play_sound('ask')
+    gamepad = empad.get_gamepad()
+    menu_pad = empad.MenuPad(gamepad)
     # gameplay playfield rect on the window (13x8 tiles, physical pixels)
     scale = gl.RENDER_SCALE
     origin = XY(int(round(gl.OFFSET_X * 2 * scale)),
@@ -750,11 +813,19 @@ def ask_confirmation(message):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return True
+            if event.type in (pygame.JOYDEVICEADDED,
+                              pygame.JOYDEVICEREMOVED):
+                gamepad.handle_event(event)
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_y:
                     return True
                 if event.key == pygame.K_n:
                     return False
+        actions = menu_pad.poll()
+        if actions["confirm"]:
+            return True
+        if actions["back"]:
+            return False
         clock.tick(20)
 
 
