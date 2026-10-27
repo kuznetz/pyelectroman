@@ -109,11 +109,26 @@ def message(position, txt, font=None, antialias=True,
         cpos.y += int(font.get_height() / scale * 1.05)
     return cpos
 
+
+def debug_message(position, txt, font=None, antialias=True,
+                  color=pygame.Color(255, 255, 255)):
+    """
+    Display a debug message on the screen.
+
+    Does nothing unless the game was started with the --debug flag.
+
+    Return position of next line as XY(x, y).
+    """
+    if not gl.debug_mode:
+        return XY.from_self(position)
+    return message(position, txt, font, antialias, color)
+
 class InfoLines:
     """
     Several information lines.
     Autoscrolling up.
     Limited visibility time.
+    Shown only in debug mode (--debug).
     """
     def __init__(self, position, max_lines, max_time):
         self.lines = []
@@ -124,12 +139,17 @@ class InfoLines:
         self.update = 0
 
     def add(self, text):
+        if not gl.debug_mode:
+            return
         if len(self.lines) == self.max_lines:
             self.lines.pop(0)
         self.lines.append(text)
         self.update = time.perf_counter()
 
     def show(self):
+        if not gl.debug_mode:
+            self.lines.clear()
+            return
         pos = self.position.copy()
         for line in self.lines:
             pos = message(pos, line)
@@ -229,7 +249,10 @@ class StatusLine:
         self.message += text
 
     def show(self):
-        global message
+        """Display the status line (debug mode only)."""
+        if not gl.debug_mode:
+            self.message = ""
+            return
         message(self.position, self.message, self.font)
         self.message = ""
 

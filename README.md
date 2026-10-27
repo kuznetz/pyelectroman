@@ -51,6 +51,14 @@ python em.py
 
 The `data/` and `maps/` directories must stay next to the sources — they hold the converted game assets.
 
+On-screen debug information (the info lines above the game scene, the status
+line below it and the logic/render timing counters) is disabled by default and
+is only drawn when the game is started with the `--debug` flag:
+
+```
+python em.py --debug
+```
+
 ## Display
 
 The game starts in fullscreen at the desktop resolution. All drawing goes through a single render coefficient (`gl.RENDER_SCALE`), which is computed from the actual surface size: the 1280x960 logical window is scaled by it, and the offsets, sprites, fonts and overlays of the playfield are multiplied by the same value. If the screen proportions differ from 4:3, the picture is centered with black bars instead of being stretched.

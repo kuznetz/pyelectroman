@@ -2,6 +2,11 @@
 
 This document lists all keyboard shortcuts available in the Python version of PyElectroMan.
 
+Debug overlays (the info lines above the game scene, the status line with the
+player position/state below it and the logic/render timing counters) are only
+drawn when the game is started as `python em.py --debug`. Without the flag only
+the game scene itself and the level minimap are shown.
+
 ## Player Controls
 
 | Key | Action |
@@ -124,11 +129,20 @@ The save file is JSON. It stores all JSON-serializable variables from
 
 ## On-Screen Information
 
-The following debug information is always displayed:
+The following debug text is drawn only when the game is started with
+`python em.py --debug`:
 
 | Location | Information |
 |----------|-------------|
-| Top-left | Performance stats (logic/render timing in ms) |
+| Top-left (outside the scene) | Performance stats (logic/render timing in ms) |
+| Top-center (above the scene) | Info lines (events such as "Disk collected", "Player died!") |
+| Bottom-left (below the scene) | Status line (position, screen, state, ammo) |
+| Top-left of the scene | Touch / to-ground overlays |
+
+The game HUD is always displayed, with or without the flag:
+
+| Location | Information |
+|----------|-------------|
 | Top-right | Minimap (16x16 level grid, scaled 64x64) |
 | Bottom-center | Disk counter (0-3), blinks when 3 disks collected |
 | Bottom-left | Temperature LED bar |
@@ -146,6 +160,7 @@ The test level (key 9) is a dedicated weapon testing arena:
 
 ## Notes
 
+- All shortcuts described on this page (level jumps, screen navigation, teleports, weapon selection, collision display, death/disks cheats) require the `--debug` command line flag; without it the game only reacts to the player controls, Esc, R, F5, F7, F9 and Alt+X.
 - Most debug shortcuts require the Shift or Ctrl modifier to prevent accidental activation during normal gameplay.
 - Player controls (arrow keys and space) only work when no modifier keys (Ctrl, Shift, Alt) are held.
 - The minimap shows the current screen position as a white dot on the level grid.

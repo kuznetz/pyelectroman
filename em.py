@@ -60,6 +60,13 @@ class Gameplay:
                              pygame.K_F5: self.on_k_f5,
                              pygame.K_F7: self.on_k_f7,
                              pygame.K_F9: self.on_k_f9}
+        # Debug shortcuts: handled only when the game runs with --debug
+        self.debug_keys = frozenset({
+            pygame.K_LEFT, pygame.K_RIGHT, pygame.K_UP, pygame.K_DOWN,
+            pygame.K_TAB,
+            pygame.K_0, pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
+            pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8, pygame.K_9,
+            pygame.K_d, pygame.K_f})
         self.deferred = None
         self.quit_ask = False
         self.restart_ask = False
@@ -372,6 +379,11 @@ class Gameplay:
                     gl.loop_main_loop = False
                 # Handle key press events (single trigger, not continuous)
                 elif event.key in self.key_handlers:
+                    # Debug shortcuts (level jumps, screen navigation,
+                    # teleports, weapon selection, collision display,
+                    # death/disks cheats) work only with --debug
+                    if event.key in self.debug_keys and not gl.debug_mode:
+                        continue
                     self.key_handlers[event.key]()
             elif event.type in (pygame.JOYDEVICEADDED,
                                 pygame.JOYDEVICEREMOVED):
@@ -400,7 +412,8 @@ class Gameplay:
 
     def show(self):
         """Display the screen."""
-        di.message(XY(1000, 8),"logic: {0:>4.1f}\nrender: {1:>4.1f}".format(
+        # Timing counters are debug information: shown only with --debug
+        di.debug_message(XY(1000, 8),"logic: {0:>4.1f}\nrender: {1:>4.1f}".format(
             round(gl.logic_time * 1000, 1), round(gl.render_time * 1000, 1)))
         di.show()
 
@@ -531,6 +544,17 @@ class Game:
     def quit(self):
         di.quit_display()
 
+def parse_args(argv):
+    """
+    Apply command line flags.
+
+    --debug  enables on-screen debug information (info lines above the
+             game scene, status line below it and the timing counters).
+    """
+    if "--debug" in argv:
+        gl.debug_mode = True
+
+
 def fast_main():
     game = Game()
     game.init()
@@ -606,4 +630,6 @@ def profile_main():
 main = fast_main
 
 if __name__ == "__main__":
+    import sys
+    parse_args(sys.argv[1:])
     main()

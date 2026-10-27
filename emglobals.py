@@ -94,6 +94,7 @@ for r in range(SCREEN_X):
 
 # system related globals
 
+debug_mode = False  # True when the game is started with the --debug flag
 log_filename = "em.log"  # empty string disables logging to file
 render_time = 0  # rendering time
 logic_time = 0   # logic processing time

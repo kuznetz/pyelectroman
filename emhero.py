@@ -808,7 +808,7 @@ class PlayerEntity(ga.FSM, ga.Entity):
                             di.info_lines.add("Secret area found!")
                         else:
                             self.take_hit()
-            di.message(XY(16, 40), "touch: %s" % names)
+            di.debug_message(XY(16, 40), "touch: %s" % names)
 
     def check_enemy_collision(self):
         """
@@ -976,7 +976,7 @@ class PlayerEntity(ga.FSM, ga.Entity):
             self.check_enemy_collision()
         # keep track of to ground distance
         self.to_ground = self.check_ground(self.screen)
-        di.message(XY(16, 8), "to ground: %d" % self.to_ground)
+        di.debug_message(XY(16, 8), "to ground: %d" % self.to_ground)
         # casual mode: edge-detect a fresh UP press (used by double jump)
         self.up_pressed = self.controller.up and not self.prev_up
         # run FSM for the player's entity
