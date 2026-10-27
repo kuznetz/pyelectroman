@@ -177,6 +177,16 @@ class Entity:
         """Return bounding box for current sprite frame as pygame.Rect."""
         return self.sprites[self.frame].bbox
 
+    def get_void_bbox(self):
+        """
+        Local rect the "void = wall" rule is tested against.
+
+        By default it is the collision box. Entities whose artwork extends
+        beyond the collision box override it, so no drawn pixel can enter a
+        missing room.
+        """
+        return self.get_bbox()
+
     def get_sides(self):
         """Return boolean table with colliding sides for the current sprite."""
         return self.sprites[self.frame].collide
@@ -328,9 +338,7 @@ class Entity:
                     collided = True
                 if collided:
                     break
-            if not collided and world.blocks_void(self.get_bbox(),
-                                                  self.get_position(),
-                                                  offset):
+            if not collided and world.blocks_void(self, offset):
                 # "Void = wall": never leave the existing rooms
                 collided = True
         return collided
@@ -532,16 +540,26 @@ class World:
                     return True
         return False
 
-    def blocks_void(self, bbox, position, offset):
+    def blocks_void(self, entity, offset):
         """
-        Check the "void = wall" rule for a move.
+        Check the "void = wall" rule for a move of ``entity``.
 
         Only the leading edge of the proposed box is tested, so an entity
-        that already straddles a seam is not locked in place.
+        that already straddles a seam is not locked in place. Upward moves
+        use the *drawn* box (``get_void_bbox``) instead of the collision
+        box: the hero's artwork is taller than his collision box, so with
+        the collision box the head was jumped above a room that has no
+        neighbour above (the sprite left the level while the camera stayed
+        put, as it is clamped to the room). Downward and sideways moves keep
+        the collision box, so nothing can hang on an invisible void edge.
         """
         ox, oy = offset
-        rect = bbox.copy()
-        rect.move_ip(position.x + ox, position.y + oy)
+        if (oy < 0) and not ox:
+            box = entity.get_void_bbox()
+        else:
+            box = entity.get_bbox()
+        rect = box.copy()
+        rect.move_ip(entity.get_position() + offset)
         if ox and not oy:
             edge = rect.right - 1 if ox > 0 else rect.left
             points = ((edge, rect.top), (edge, rect.centery),
@@ -730,66 +748,152 @@ class World:
         return lo, hi
 
     @staticmethod
-    def _clamp_to_runs(value, intervals, focus_run, size):
-        """Clamp value into the intersection of intervals (or focus run)."""
-        if intervals:
-            lo = max(interval[0] for interval in intervals)
-            hi = min(interval[1] for interval in intervals)
-            if lo <= hi:
-                return max(lo, min(hi, value))
-        if focus_run:
-            lo, hi = focus_run[0] * size, focus_run[1] * size
-            return max(lo, min(hi, value))
-        return value
+    def _clamp_into(value, lo, hi):
+        """Clamp value into the [lo, hi] range."""
+        return max(lo, min(hi, value))
 
-    def _clamp_camera_y(self, y, camera_x, focus_x, focus_y):
-        gx0 = max(0, min(gl.ROOMS_X - 1, camera_x // gl.MAX_X))
-        gx1 = max(0, min(gl.ROOMS_X - 1,
-                         (camera_x + gl.MAX_X - 1) // gl.MAX_X))
-        gy0 = max(0, min(gl.ROOMS_Y - 1, y // gl.MAX_Y))
-        gy1 = max(0, min(gl.ROOMS_Y - 1, (y + gl.MAX_Y - 1) // gl.MAX_Y))
-        intervals = []
-        for gx in range(gx0, gx1 + 1):
-            for gy in range(gy0, gy1 + 1):
-                run = self._run_y(gx, gy)
-                if run:
-                    intervals.append((run[0] * gl.MAX_Y, run[1] * gl.MAX_Y))
-        fx = max(0, min(gl.ROOMS_X - 1, focus_x // gl.MAX_X))
-        fy = max(0, min(gl.ROOMS_Y - 1, focus_y // gl.MAX_Y))
-        return self._clamp_to_runs(y, intervals, self._run_y(fx, fy),
-                                   gl.MAX_Y)
+    @staticmethod
+    def _intersect_intervals(first, second):
+        """Intersect two lists of (lo, hi) camera ranges."""
+        result = []
+        for alo, ahi in first:
+            for blo, bhi in second:
+                lo, hi = max(alo, blo), min(ahi, bhi)
+                if lo <= hi:
+                    result.append((lo, hi))
+        return result
 
-    def _clamp_camera_x(self, x, camera_y, focus_x, focus_y):
-        gy0 = max(0, min(gl.ROOMS_Y - 1, camera_y // gl.MAX_Y))
-        gy1 = max(0, min(gl.ROOMS_Y - 1,
-                         (camera_y + gl.MAX_Y - 1) // gl.MAX_Y))
-        gx0 = max(0, min(gl.ROOMS_X - 1, x // gl.MAX_X))
-        gx1 = max(0, min(gl.ROOMS_X - 1, (x + gl.MAX_X - 1) // gl.MAX_X))
-        intervals = []
-        for gy in range(gy0, gy1 + 1):
-            for gx in range(gx0, gx1 + 1):
-                run = self._run_x(gx, gy)
-                if run:
-                    intervals.append((run[0] * gl.MAX_X, run[1] * gl.MAX_X))
-        fy = max(0, min(gl.ROOMS_Y - 1, focus_y // gl.MAX_Y))
-        fx = max(0, min(gl.ROOMS_X - 1, focus_x // gl.MAX_X))
-        return self._clamp_to_runs(x, intervals, self._run_x(fx, fy),
-                                   gl.MAX_X)
+    @classmethod
+    def _clamp_to_intervals(cls, value, intervals):
+        """Clamp value into the interval nearest to it (None when empty)."""
+        best = None
+        for lo, hi in intervals:
+            candidate = cls._clamp_into(value, lo, hi)
+            if best is None or abs(candidate - value) < abs(best - value):
+                best = candidate
+        return best
+
+    def _row_intervals(self, gy):
+        """Camera X ranges that keep the viewport inside one run of row gy."""
+        if not (0 <= gy < gl.ROOMS_Y):
+            return []
+        result = []
+        gx = 0
+        while gx < gl.ROOMS_X:
+            if not self.room_exists(gx, gy):
+                gx += 1
+                continue
+            start = gx
+            while (gx + 1 < gl.ROOMS_X) and self.room_exists(gx + 1, gy):
+                gx += 1
+            result.append((start * gl.MAX_X, gx * gl.MAX_X))
+            gx += 1
+        return result
+
+    def _column_intervals(self, gx):
+        """Camera Y ranges that keep the viewport inside one run of column gx."""
+        if not (0 <= gx < gl.ROOMS_X):
+            return []
+        result = []
+        gy = 0
+        while gy < gl.ROOMS_Y:
+            if not self.room_exists(gx, gy):
+                gy += 1
+                continue
+            start = gy
+            while (gy + 1 < gl.ROOMS_Y) and self.room_exists(gx, gy + 1):
+                gy += 1
+            result.append((start * gl.MAX_Y, gy * gl.MAX_Y))
+            gy += 1
+        return result
+
+    @staticmethod
+    def _covered_cells(value, size):
+        """Room indices a viewport of ``size`` starting at value covers."""
+        return range(value // size, (value + size - 1) // size + 1)
+
+    def _camera_fits(self, x, y, fx, fy):
+        """
+        True when the viewport at (x, y) shows only existing rooms and still
+        contains the hero's room (fx, fy).
+        """
+        columns = self._covered_cells(x, gl.MAX_X)
+        rows = self._covered_cells(y, gl.MAX_Y)
+        if fx not in columns or fy not in rows:
+            return False
+        for gx in columns:
+            for gy in rows:
+                if not self.room_exists(gx, gy):
+                    return False
+        return True
 
     def center_camera(self, focus_x, focus_y):
         """
-        Center the camera on (focus_x, focus_y), clamped so no missing room
-        ever shows up in the viewport. Two passes (vertical -> horizontal ->
-        vertical) protect concave corners.
+        Center the camera on (focus_x, focus_y) so that the viewport never
+        shows a missing room and never scrolls the hero out of the frame.
+
+        The viewport is exactly one room big, so it covers one or two rooms
+        per axis (two when it straddles a seam). A position is valid only
+        when *every* covered room exists. The camera therefore starts from
+        the hero's own row/column run and is only refined by the runs of the
+        extra row/column the viewport happens to cover.
+
+        The previous version intersected the runs of all columns under the
+        viewport, so a room located diagonally below-right forced the camera
+        a whole room down - the hero left the frame when there was no room
+        to his right.
         """
         cam = gl.camera
         if cam is None:
             return
-        x = focus_x - gl.MAX_X // 2
-        y = focus_y - gl.MAX_Y // 2
-        y = self._clamp_camera_y(y, x, focus_x, focus_y)
-        x = self._clamp_camera_x(x, y, focus_x, focus_y)
-        y = self._clamp_camera_y(y, x, focus_x, focus_y)
+        fx = max(0, min(gl.ROOMS_X - 1, focus_x // gl.MAX_X))
+        fy = max(0, min(gl.ROOMS_Y - 1, focus_y // gl.MAX_Y))
+        xd = focus_x - gl.MAX_X // 2      # desired (hero centered) position
+        yd = focus_y - gl.MAX_Y // 2
+        run_x = self._run_x(fx, fy)
+        run_y = self._run_y(fx, fy)
+        if run_x is None or run_y is None:
+            # the hero is outside the level data - follow him anyway
+            cam.x = int(xd) & ~1
+            cam.y = int(yd) & ~1
+            return
+        # The hero's row and column always bound the camera: the viewport
+        # never leaves the runs the hero belongs to, which keeps him in
+        # frame (leaving a run would jump the camera to another room).
+        row_limits = (run_x[0] * gl.MAX_X, run_x[1] * gl.MAX_X)
+        column_limits = (run_y[0] * gl.MAX_Y, run_y[1] * gl.MAX_Y)
+        x = self._clamp_into(xd, *row_limits)
+        y = self._clamp_into(yd, *column_limits)
+        for _ in range(3):
+            # horizontal: every row under the viewport must have a room
+            intervals = [row_limits]
+            for gy in self._covered_cells(y, gl.MAX_Y):
+                if gy != fy:
+                    intervals = self._intersect_intervals(
+                        intervals, self._row_intervals(gy))
+            new_x = self._clamp_to_intervals(xd, intervals)
+            if new_x is None:
+                x = None
+                break
+            # vertical: every column under the viewport must have a room
+            intervals = [column_limits]
+            for gx in self._covered_cells(new_x, gl.MAX_X):
+                if gx != fx:
+                    intervals = self._intersect_intervals(
+                        intervals, self._column_intervals(gx))
+            new_y = self._clamp_to_intervals(yd, intervals)
+            if new_y is None:
+                x = None
+                break
+            if (new_x, new_y) == (x, y):
+                break
+            x, y = new_x, new_y
+        if (x is None) or not self._camera_fits(x, y, fx, fy):
+            # Concave corner (only a diagonal neighbour exists): align the
+            # viewport with the hero's column. The viewport then covers the
+            # hero's column only, which is always a valid position.
+            x = fx * gl.MAX_X
+            y = self._clamp_into(yd, *column_limits)
         cam.x = int(x) & ~1
         cam.y = int(y) & ~1
 

@@ -190,6 +190,19 @@ class PlayerEntity(ga.FSM, ga.Entity):
         """Override Entity.get_bbox() - single bbox for all hero sprites."""
         return self.bbox.copy()
 
+    def get_void_bbox(self):
+        """
+        Box used by the "void = wall" rule (docs/seamless_level.md 2.3).
+
+        The collision box (16, 12, 16, 84) is narrower and 12 px shorter
+        than the two 48x48 sprites drawn at the entity position, so testing
+        it let the top of the hero's sprite enter a room that does not
+        exist: he jumped up "through" the ceiling of the level and his head
+        was drawn outside the room (the camera is clamped to the room, so it
+        stayed put - as intended). Return the whole drawn sprite box instead.
+        """
+        return pygame.Rect(0, 0, gl.SPRITE_X, gl.SPRITE_Y * 2)
+
     def get_sides(self):
         """Override Entity.get_sides() - collides from all sides."""
         return {"L": True, "R": True, "T": True, "B": True}

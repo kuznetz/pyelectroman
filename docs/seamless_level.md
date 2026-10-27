@@ -162,7 +162,12 @@ API:
   `world.colliders_in_rect()` / `world.entities_in_rect()`.
 * Movement projection (`check_move`, step 2 px) is unchanged — only the source of the collider list changes.
 * Additional rule in `check_collision` for the hero and enemies:
-  `if world.is_void_at(proposed_rect): blocked = True` — “void = wall”.
+  `if world.blocks_void(entity, offset): blocked = True` — “void = wall”.
+  The leading edge of the move is tested (instead of the whole box), so an entity already
+  straddling a seam is not locked in place. Upward moves test the **drawn** box
+  ([`Entity.get_void_bbox()`](emgame.py:180), the hero returns his two 48×48 sprites) rather than
+  the collision box — the artwork is 12 px taller than the collision box, so with the collision
+  box the hero's head was jumped above a room that has no neighbour above.
 * Enemy scans (`initialize_patrol`, `would_collide_at`, `has_ground_at`,
   [`emgame.py`](emgame.py:1171-1224)) work against the world, but the scan range
   (12 tiles / 13 tiles) remains — behavior is preserved.
@@ -216,17 +221,28 @@ render_pos(wx, wy) = round((wx - camera.x) * 2 * S), round((wy - camera.y) * 2 *
 
 ### 2.6 Camera clamping (no void in frame)
 
-Levels are not rectangular, so the camera is limited by the “run” of existing rooms:
+The viewport is exactly one room big, so it covers one or two rooms per axis (two when it
+straddles a seam). A camera position is valid only when **every** covered room exists:
 
-* on X: `[left_room_left, right_room_right - MAX_X]`, where the run is a continuous chain
-  of existing rooms in the row;
-* on Y: similarly by column;
-* two passes: vertical → horizontal (intersection of runs of affected rows) → vertical again.
-  Protection against diagonal voids in concave places.
+* the camera never leaves the hero's own row/column run, so the hero can never be scrolled
+  out of the frame;
+* on X: intersection of the runs of all rows under the viewport
+  ([`World._row_intervals()`](emgame.py:776)), bounded by the hero's row run;
+* on Y: intersection of the runs of all columns under the viewport
+  ([`World._column_intervals()`](emgame.py:793)), bounded by the hero's column run;
+* both passes repeat (up to 3 times, since the covered neighbour row/column may change),
+  then [`World._camera_fits()`](emgame.py:815) validates the result;
+* concave corners (a room exists only diagonally, or a diagonal void) fall back to aligning
+  the viewport with the hero's column — that position is always valid.
 
 Consequence: in the middle of a “run” the hero is strictly centered (viewport = room, camera range
 ±1 room per axis); at map edges (or in a dead-end room without neighbors) the hero is offset
 from the center — otherwise void would enter the frame.
+
+The camera also never jumps vertically while the hero walks along a room. The previous version
+intersected the runs of the neighbouring column unconditionally, so a room located only
+*diagonally below-right* of the hero forced the camera a whole room down (the hero left the
+frame when the room to his right was missing).
 
 ### 2.7 HUD
 
@@ -415,6 +431,12 @@ teleport and respawn work, camera snaps.
 - [x] Vertical descents (`V open`): fall into the lower room, no return upward
       (as in the original), camera without jerking.
 - [x] Camera: hero centered, clamping at edges, no empty rooms in frame.
+- [x] Camera: walking along a room whose right neighbour is missing (only a room
+      diagonally below-right exists) — the camera does not drop a room down, the hero stays
+      in frame (swept every room of all 8 levels: no vertical jumps, hero always visible,
+      no missing room in frame).
+- [x] Jump: no room above — the hero's drawn sprite cannot leave the room (the previous
+      collision box let the head 12 px above the seam).
 - [x] Projectiles: death at the activity zone boundary (±half-screen beyond the frame), not at the frame
       edge; walls at seams; no “hangs”.
 - [x] Activity zone: an enemy 300 px beyond the frame still moves, at 700 px — already stands;
